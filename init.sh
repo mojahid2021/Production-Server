@@ -116,7 +116,7 @@ show_banner() {
             "  Run:  sudo ./init.sh -u <user> -n 20   (with flags)"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
-    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN MODE — Zero system changes will be made.${R}\n"
+    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN MODE — Zero system changes will be made.${R}\n" || true
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1084,7 +1084,7 @@ print_summary() {
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
-    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN — Zero changes were made to this system.${R}\n"
+    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN — Zero changes were made to this system.${R}\n" || true
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
