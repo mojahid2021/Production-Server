@@ -25,7 +25,7 @@ git clone → npm install → pm2 start → nginx_add_site
 |---|---|
 | OS | Ubuntu 20.04, 22.04, or 24.04 LTS |
 | Access | Must run as root (`sudo`) |
-| Internet | Required (downloads NVM, Node.js, Netdata) |
+| Internet | Required (downloads NVM, Node.js, Prometheus, Grafana) |
 | Fresh server | Recommended — works on existing servers too |
 
 ---
@@ -66,7 +66,7 @@ A confirmation summary is shown before anything happens. You type `y` to proceed
 | `--no-pm2` | Skip PM2 installation | — |
 | `--no-nginx` | Skip Nginx base setup | — |
 | `--no-fw` | Skip UFW firewall configuration | — |
-| `--no-mon` | Skip Netdata monitoring installation | — |
+| `--no-mon` | Skip Grafana/Prometheus monitoring installation | — |
 | `--dry-run` | Simulate every step — zero system changes | — |
 | `-h` | Show help and exit | — |
 
@@ -324,7 +324,7 @@ nginx-logs    # tail -f /var/log/nginx/*.log
 
 ---
 
-### 9. Monitoring — Three Layers
+### 9. Monitoring — Four Layers
 
 #### Layer 1: `server_status` — Instant CLI Overview
 
@@ -343,7 +343,7 @@ Displays in one screen:
 - **PM2 apps** — full `pm2 list` table
 - **Nginx active sites** — name, domain, and port for each
 - **Firewall (UFW)** — status summary
-- **Netdata** — status and access instructions
+- **Grafana** — status and SSH tunnel access instructions
 
 #### Layer 2: PM2 Built-in Monitor
 
@@ -352,26 +352,39 @@ pm2 monit   # live per-process CPU + memory in terminal
 pm2 logs    # live scrolling log output from all apps
 ```
 
-#### Layer 3: Netdata — Full Real-Time Browser Dashboard
+#### Layer 3: Prometheus — Metrics Collection and Storage
 
-Netdata is installed during provisioning and runs as a background service. It is bound to `127.0.0.1:19999` — not accessible from the internet. You access it through an SSH tunnel:
+Prometheus is installed as a background service and collects system metrics from `node_exporter` every 15 seconds. Metrics are stored locally for 15 days.
+
+- **node_exporter** scrapes OS-level metrics (CPU, RAM, disk, network) from `127.0.0.1:9100`
+- **Prometheus** stores time-series data at `127.0.0.1:9090`
+- Both services run as dedicated system users under systemd
+
+#### Layer 4: Grafana — Beautiful Real-Time Browser Dashboard
+
+Grafana is installed during provisioning and runs as a background service. It is bound to `127.0.0.1:3001` — not accessible from the internet. You access it through an SSH tunnel:
 
 ```bash
 # Step 1: Run this on your LOCAL machine (laptop/PC):
-ssh -L 19999:localhost:19999 mojahid@your-server-ip
+ssh -L 3001:localhost:3001 mojahid@your-server-ip
 
 # Step 2: Open in your browser:
-http://localhost:19999
+http://localhost:3001
+# Default login: admin / admin  ← change this on first login!
 ```
 
-Netdata shows real-time graphs updating every second:
-- CPU usage (per core)
-- RAM and swap usage
-- Disk read/write speed
-- Network in/out bandwidth
-- Per-process metrics (Node.js, Nginx, etc.)
-- System load over time
-- Alerts for unusual activity
+Grafana comes pre-configured with:
+- **Prometheus** connected as the default data source
+- **Node Exporter Full** dashboard (ID 1860) pre-loaded in the *System* folder
+
+The dashboard shows beautiful, interactive graphs updating every 15 seconds:
+- CPU usage (per core, overall, idle/system/user breakdown)
+- RAM and swap usage with history
+- Disk read/write speed and I/O utilisation
+- Network in/out bandwidth per interface
+- System load average (1m, 5m, 15m)
+- Per-process CPU and memory
+- Full alert support via Grafana's built-in Alerting UI
 
 ---
 
@@ -415,7 +428,7 @@ UFW (Uncomplicated Firewall) is configured with a deny-all default policy. Only 
 | 22 (SSH) | ✅ | Remote access |
 | 80 (HTTP) | ✅ | Nginx + Let's Encrypt |
 | 443 (HTTPS) | ✅ | Nginx SSL |
-| 19999 (Netdata) | ✅ | Accessible via SSH tunnel only |
+| 9090, 9100, 3001 (monitoring) | ❌ | Bound to 127.0.0.1 — no external rule needed |
 | 3000, 4000, 5000... | ❌ | App ports — localhost only via Nginx |
 
 Your Node.js apps are **never** directly exposed to the internet. Traffic always goes through Nginx.
@@ -467,7 +480,7 @@ Every login session is configured with sane, secure defaults written to `~/.depl
 | **PM2 startup is bulletproof** | Uses the exact NVM binary path — does not silently fail |
 | **Multi-project Nginx** | Host unlimited projects on one server |
 | **`nginx_add_site` helper** | Add a new project to Nginx in one command |
-| **Three monitoring layers** | Terminal, PM2, and full Netdata browser dashboard |
+| **Four monitoring layers** | Terminal, PM2, Prometheus metrics, and Grafana browser dashboard |
 | **Both SSH auth methods** | Password and key — flexible for different workflows |
 | **Sudo is layered** | Common tasks need no password, sensitive operations do |
 | **Kernel hardening** | Protection applied at OS level, not just app level |
@@ -482,13 +495,13 @@ Every login session is configured with sane, secure defaults written to `~/.depl
 | Limitation | Explanation and workaround |
 |---|---|
 | **Ubuntu only** | Tested on Ubuntu 20.04, 22.04, 24.04. Other Debian-based distros may work but are not guaranteed |
-| **Requires internet** | NVM, Node.js, and Netdata are downloaded during provisioning. Offline servers must use `--no-nvm` and `--no-mon` and install manually |
+| **Requires internet** | NVM, Node.js, Prometheus, and Grafana are downloaded during provisioning. Offline servers must use `--no-nvm` and `--no-mon` and install manually |
 | **One user per run** | Each run provisions one user. Run the script again with a different username to add another user |
 | **SSH password login is enabled** | More convenient but less secure than key-only. Add your public key with `-k` and consider disabling password auth in sshd after that |
 | **Root SSH login is blocked** | You cannot `ssh root@server` directly — this is intentional. Login as your user then run `sudo -i` |
 | **No database setup** | PostgreSQL, MySQL, Redis, MongoDB — you install and configure these separately |
 | **No CI/CD pipeline** | The script sets up the environment — connecting GitHub Actions or GitLab CI to this server is a separate step |
-| **Netdata sends no alerts by default** | Netdata is installed for visibility. Email/Slack alerts require additional configuration in `/etc/netdata/` |
+| **Grafana has no alerts by default** | Grafana is installed for visibility. Email/Slack alerts require additional configuration in the Grafana UI under Alerting |
 | **fail2ban covers SSH only** | Nginx brute force protection is not configured by default |
 | **No automatic SSL renewal check** | Certbot installs a renewal cron automatically, but verify it: `sudo certbot renew --dry-run` |
 | **NVM is per-user** | Other users on the same server do not share this Node.js installation. This is intentional — it provides isolation |
@@ -503,7 +516,7 @@ Be clear about the scope. You need to handle these separately:
 - **Set up a database** — PostgreSQL, MySQL, MongoDB, Redis — install these as root after provisioning.
 - **Point your domain** — Log into your domain registrar and set an A record pointing to your server IP.
 - **Configure CI/CD** — GitHub Actions, GitLab CI, Bitbucket Pipelines — set these up in your repo settings.
-- **Configure Netdata alerts** — Netdata runs but email/Slack notifications need manual setup.
+- **Configure Grafana alerts** — Grafana runs but email/Slack notifications need manual setup in the Grafana UI under Alerting.
 - **Backup strategy** — No automated backup system is configured.
 
 ---
@@ -677,11 +690,11 @@ sudo ufw allow 8080/tcp
 sudo ufw status
 ```
 
-### Access Netdata dashboard
+### Access Grafana dashboard
 ```bash
 # On your LOCAL machine:
-ssh -L 19999:localhost:19999 mojahid@your-server-ip
-# Then open: http://localhost:19999
+ssh -L 3001:localhost:3001 mojahid@your-server-ip
+# Then open: http://localhost:3001  (login: admin / admin)
 ```
 
 ### Check fail2ban bans
@@ -780,7 +793,7 @@ cat /var/log/node_provision.log
 - **Password login is enabled** — convenient but weaker than key-only. If you add your SSH public key via `-k`, consider disabling password auth later: edit `/etc/ssh/sshd_config`, set `PasswordAuthentication no`, reload sshd.
 - **Root SSH login is permanently blocked** — `PermitRootLogin no` is enforced. To reach root: `ssh` as your deploy user, then `sudo -i`. This is intentional and should not be changed.
 - **The deploy user has full sudo** — the password for this user is effectively the key to the server. Store it in a secrets manager (Bitwarden, 1Password, etc.).
-- **Netdata is localhost-only** — it does not expose a public endpoint. Access is always via SSH tunnel.
+- **Monitoring stack is localhost-only** — Grafana (3001), Prometheus (9090), and node_exporter (9100) are all bound to 127.0.0.1. Access is always via SSH tunnel.
 - **fail2ban is active** — 5 failed SSH attempts = 1 hour IP ban. Adjust in `/etc/fail2ban/jail.d/node-provision.conf`.
 - **Nginx blocks secret files** — `.env`, `.git`, `.key`, `.pem`, `.sh` files are blocked at the Nginx level and return 404.
 - **Kernel hardening is applied** — SYN flood, IP spoofing, redirect attacks, and symlink exploits are all mitigated via sysctl.

@@ -11,7 +11,7 @@
 # ║  04. Installs Git, NVM, Node.js, PM2 (bulletproof startup)                  ║
 # ║  05. Nginx base setup for MULTIPLE Node.js projects                          ║
 # ║  06. Shell profile — aliases, NVM, PM2 auto-complete                        ║
-# ║  07. Monitoring: Netdata (real-time) + PM2 dashboard + status script        ║
+# ║  07. Monitoring: Grafana + Prometheus + node_exporter + PM2 + status script ║
 # ║  08. fail2ban, sysctl hardening, UFW, logrotate                             ║
 # ║                                                                              ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
@@ -28,7 +28,7 @@
 # ║        --no-nvm     Skip NVM + Node.js                                       ║
 # ║        --no-pm2     Skip PM2                                                 ║
 # ║        --no-fw      Skip UFW                                                 ║
-# ║        --no-mon     Skip Netdata monitoring                                  ║
+# ║        --no-mon     Skip Grafana/Prometheus monitoring                       ║
 # ║    -h  --help       Show this help and exit                                  ║
 # ║                                                                              ║
 # ║  EXAMPLES                                                                    ║
@@ -104,7 +104,7 @@ show_banner() {
     printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
             "  ⚡  init.sh  —  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
     printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Ubuntu 20.04 / 22.04 / 24.04 LTS  ·  Git · NVM · PM2 · Nginx · Netdata"
+            "  Ubuntu 20.04 / 22.04 / 24.04 LTS  ·  Git · NVM · PM2 · Nginx · Grafana"
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
     printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
             "  Run:  sudo ./init.sh                    (interactive)"
@@ -140,7 +140,7 @@ usage() {
         "    --no-nvm"   "Skip NVM + Node.js installation" \
         "    --no-pm2"   "Skip PM2 installation" \
         "    --no-fw"    "Skip UFW firewall configuration" \
-        "    --no-mon"   "Skip Netdata monitoring installation" \
+        "    --no-mon"   "Skip Grafana/Prometheus monitoring installation" \
         "-h  --help"     "Show this help and exit"
     echo ""
     echo -e "  ${BOLD}${WHT}Examples${R}"
@@ -326,7 +326,7 @@ prompt_inputs() {
     _conf_row "NVM"         "$(  $INSTALL_NVM && echo "✔ install" || echo "– skip (--no-nvm)")"
     _conf_row "PM2"         "$(  $INSTALL_PM2 && echo "✔ install" || echo "– skip (--no-pm2)")"
     _conf_row "UFW"         "$(  $GEN_FW      && echo "✔ configure" || echo "– skip (--no-fw)")"
-    _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Netdata + PM2 + server_status" || echo "– skip (--no-mon)")"
+    _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Grafana + Prometheus + PM2 + server_status" || echo "– skip (--no-mon)")"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
@@ -671,43 +671,243 @@ install_pm2() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  11 — MONITORING
 #
-#  Three layers:
-#    A. Netdata    — real-time system dashboard (CPU, RAM, disk, network)
-#    B. PM2 monit  — built-in process monitor for Node.js apps
-#    C. server_status script — quick CLI overview of everything
+#  Five layers:
+#    A. node_exporter  — system metrics collector (CPU, RAM, disk, network)
+#    B. Prometheus     — metrics database (15-day retention)
+#    C. Grafana        — beautiful real-time browser dashboard (port 3001)
+#    D. PM2 monit      — built-in process monitor for Node.js apps
+#    E. server_status  — quick CLI overview of everything
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 setup_monitoring() {
     $SETUP_MON || { section "10" "Monitoring"; warn "Skipped (--no-mon)."; section_end; return; }
 
-    section "10" "Monitoring — Netdata + PM2 + Status Script"
+    section "10" "Monitoring — Prometheus + Grafana + PM2 + Status Script"
 
-    # ── A. Netdata — real-time server dashboard ───────────────────────────────
-    info "Installing Netdata (real-time monitoring dashboard)..."
-    if ! command -v netdata &>/dev/null; then
-        curl -fsSL https://get.netdata.cloud/kickstart.sh | bash -s -- \
-            --non-interactive \
-            --stable-channel \
-            --disable-telemetry \
-            2>&1 | tail -10 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || {
-            warn "Netdata install failed — try manually: bash <(curl -fsSL https://get.netdata.cloud/kickstart.sh)"
-        }
+    # Detect system architecture once (used by Prometheus and node_exporter)
+    local arch
+    arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
+    case "$arch" in
+        amd64|x86_64) arch="amd64" ;;
+        arm64|aarch64) arch="arm64" ;;
+        *) arch="amd64" ;;
+    esac
+
+    # ── A. node_exporter — system metrics collector ───────────────────────────
+    local ne_ver="1.8.2"
+    info "Installing node_exporter v${ne_ver} (system metrics collector)..."
+    if ! command -v node_exporter &>/dev/null; then
+        wget -q \
+            "https://github.com/prometheus/node_exporter/releases/download/v${ne_ver}/node_exporter-${ne_ver}.linux-${arch}.tar.gz" \
+            -O /tmp/node_exporter.tar.gz 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        if [[ -f /tmp/node_exporter.tar.gz ]]; then
+            tar xzf /tmp/node_exporter.tar.gz -C /tmp
+            mv "/tmp/node_exporter-${ne_ver}.linux-${arch}/node_exporter" /usr/local/bin/
+            rm -rf "/tmp/node_exporter-${ne_ver}.linux-${arch}" /tmp/node_exporter.tar.gz
+            ok "node_exporter installed."
+        else
+            warn "node_exporter download failed — install manually from https://prometheus.io/download/"
+        fi
     else
-        ok "Netdata already installed."
+        ok "node_exporter already installed."
     fi
 
-    # Netdata runs on port 19999 by default — restrict to localhost only
-    if [[ -f /etc/netdata/netdata.conf ]]; then
-        # Bind only to localhost — access via SSH tunnel, not public internet
-        sed -i 's/.*bind to.*/\tbind to = 127.0.0.1/' /etc/netdata/netdata.conf 2>/dev/null || true
-        systemctl restart netdata 2>/dev/null || true
-        ok "Netdata: bound to 127.0.0.1:19999 (localhost only)."
-        info "Access dashboard via SSH tunnel:"
-        info "  ssh -L 19999:localhost:19999 $USERNAME@<server-ip>"
-        info "  Then open: http://localhost:19999"
+    # Create node_exporter service user and systemd unit
+    useradd --no-create-home --shell /bin/false node_exporter 2>/dev/null || true
+    if [[ ! -f /etc/systemd/system/node_exporter.service ]]; then
+        cat > /etc/systemd/system/node_exporter.service <<'NESERVICE'
+[Unit]
+Description=Node Exporter
+After=network.target
+
+[Service]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/usr/local/bin/node_exporter --web.listen-address=127.0.0.1:9100
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+NESERVICE
+        systemctl daemon-reload
+        systemctl enable --now node_exporter 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        ok "node_exporter service enabled (127.0.0.1:9100)."
+    else
+        ok "node_exporter service already configured."
     fi
 
-    # ── B. PM2 log rotation module ────────────────────────────────────────────
+    # ── B. Prometheus — metrics database ─────────────────────────────────────
+    local prom_ver="2.53.1"
+    info "Installing Prometheus v${prom_ver} (metrics database)..."
+    if ! command -v prometheus &>/dev/null; then
+        wget -q \
+            "https://github.com/prometheus/prometheus/releases/download/v${prom_ver}/prometheus-${prom_ver}.linux-${arch}.tar.gz" \
+            -O /tmp/prometheus.tar.gz 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        if [[ -f /tmp/prometheus.tar.gz ]]; then
+            tar xzf /tmp/prometheus.tar.gz -C /tmp
+            mv "/tmp/prometheus-${prom_ver}.linux-${arch}/prometheus"  /usr/local/bin/
+            mv "/tmp/prometheus-${prom_ver}.linux-${arch}/promtool"    /usr/local/bin/
+            mkdir -p /etc/prometheus /var/lib/prometheus
+            cp -r "/tmp/prometheus-${prom_ver}.linux-${arch}/consoles"          /etc/prometheus/
+            cp -r "/tmp/prometheus-${prom_ver}.linux-${arch}/console_libraries" /etc/prometheus/
+            rm -rf "/tmp/prometheus-${prom_ver}.linux-${arch}" /tmp/prometheus.tar.gz
+            ok "Prometheus installed."
+        else
+            warn "Prometheus download failed — install manually from https://prometheus.io/download/"
+        fi
+    else
+        ok "Prometheus already installed."
+    fi
+
+    # Prometheus system user, directories, config
+    useradd --no-create-home --shell /bin/false prometheus 2>/dev/null || true
+    mkdir -p /etc/prometheus /var/lib/prometheus
+    chown prometheus:prometheus /etc/prometheus /var/lib/prometheus
+
+    if [[ ! -f /etc/prometheus/prometheus.yml ]]; then
+        cat > /etc/prometheus/prometheus.yml <<'PROMCFG'
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'node'
+    static_configs:
+      - targets: ['127.0.0.1:9100']
+PROMCFG
+        chown prometheus:prometheus /etc/prometheus/prometheus.yml
+        ok "Prometheus config written to /etc/prometheus/prometheus.yml."
+    else
+        ok "Prometheus config already exists."
+    fi
+
+    if [[ ! -f /etc/systemd/system/prometheus.service ]]; then
+        cat > /etc/systemd/system/prometheus.service <<'PROMSVC'
+[Unit]
+Description=Prometheus Monitoring
+After=network.target
+
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/prometheus \
+    --config.file=/etc/prometheus/prometheus.yml \
+    --storage.tsdb.path=/var/lib/prometheus/ \
+    --web.listen-address=127.0.0.1:9090 \
+    --web.console.templates=/etc/prometheus/consoles \
+    --web.console.libraries=/etc/prometheus/console_libraries \
+    --storage.tsdb.retention.time=15d
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+PROMSVC
+        systemctl daemon-reload
+        systemctl enable --now prometheus 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        ok "Prometheus service enabled (127.0.0.1:9090)."
+    else
+        ok "Prometheus service already configured."
+    fi
+
+    # ── C. Grafana — dashboard UI ─────────────────────────────────────────────
+    info "Installing Grafana (dashboard UI)..."
+    if ! command -v grafana-server &>/dev/null; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https software-properties-common 2>/dev/null | \
+            tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        if wget -q -O /usr/share/keyrings/grafana.key https://apt.grafana.com/gpg.key 2>/dev/null; then
+            echo "deb [signed-by=/usr/share/keyrings/grafana.key] https://apt.grafana.com stable main" \
+                > /etc/apt/sources.list.d/grafana.list
+            DEBIAN_FRONTEND=noninteractive apt-get update -q 2>/dev/null | \
+                tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y grafana 2>&1 | \
+                tail -5 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || {
+                warn "Grafana install failed — try manually: apt-get install -y grafana"
+            }
+        else
+            warn "Grafana GPG key download failed — see: https://grafana.com/docs/grafana/latest/setup-grafana/installation/debian/"
+        fi
+    else
+        ok "Grafana already installed."
+    fi
+
+    # Configure Grafana: bind to localhost only, port 3001
+    # (port 3001 avoids conflicts with Node.js apps commonly running on port 3000)
+    if [[ -f /etc/grafana/grafana.ini ]]; then
+        sed -i 's/^;*\s*http_port\s*=.*/http_port = 3001/'      /etc/grafana/grafana.ini 2>/dev/null || true
+        sed -i 's/^;*\s*http_addr\s*=.*/http_addr = 127.0.0.1/' /etc/grafana/grafana.ini 2>/dev/null || true
+        ok "Grafana: configured to listen on 127.0.0.1:3001."
+    fi
+
+    # Provision Prometheus as the default Grafana data source
+    mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards
+    if [[ ! -f /etc/grafana/provisioning/datasources/prometheus.yaml ]]; then
+        cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<'GFDS'
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    url: http://127.0.0.1:9090
+    access: proxy
+    isDefault: true
+    editable: false
+GFDS
+        chown grafana:grafana /etc/grafana/provisioning/datasources/prometheus.yaml 2>/dev/null || true
+        ok "Grafana: Prometheus data source provisioned."
+    else
+        ok "Grafana: Prometheus data source already provisioned."
+    fi
+
+    # Download and provision the Node Exporter Full dashboard (Grafana.com ID 1860)
+    local dash_dir="/var/lib/grafana/dashboards"
+    mkdir -p "$dash_dir"
+    if [[ ! -f "${dash_dir}/node_exporter_full.json" ]]; then
+        info "Downloading Node Exporter Full dashboard (grafana.com/dashboards/1860)..."
+        if curl -fsSL \
+            "https://grafana.com/api/dashboards/1860/revisions/latest/download" \
+            -o "${dash_dir}/node_exporter_full.json" 2>/dev/null; then
+            # Replace datasource input placeholder with our provisioned source name
+            sed -i 's/\${DS_PROMETHEUS}/Prometheus/g; s/"\${DS_PROMETHEUS}"/"Prometheus"/g' "${dash_dir}/node_exporter_full.json" 2>/dev/null || true
+            chown -R grafana:grafana "$dash_dir" 2>/dev/null || true
+            ok "Node Exporter Full dashboard downloaded."
+        else
+            warn "Dashboard download failed — import manually: Grafana → + → Import → ID 1860"
+        fi
+    else
+        ok "Node Exporter Full dashboard already present."
+    fi
+
+    # Provision dashboard directory in Grafana
+    if [[ ! -f /etc/grafana/provisioning/dashboards/node_exporter.yaml ]]; then
+        cat > /etc/grafana/provisioning/dashboards/node_exporter.yaml <<GFDB
+apiVersion: 1
+providers:
+  - name: 'Node Exporter'
+    orgId: 1
+    folder: 'System'
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: ${dash_dir}
+GFDB
+        chown grafana:grafana /etc/grafana/provisioning/dashboards/node_exporter.yaml 2>/dev/null || true
+        ok "Grafana dashboard provider provisioned."
+    fi
+
+    # Start Grafana
+    systemctl daemon-reload
+    systemctl enable --now grafana-server 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+    ok "Grafana service enabled (127.0.0.1:3001)."
+    info "Access Grafana dashboard via SSH tunnel:"
+    info "  ssh -L 3001:localhost:3001 $USERNAME@<server-ip>"
+    info "  Then open: http://localhost:3001  (default login: admin / admin)"
+    info "  ⚠  Change your Grafana password immediately after first login!"
+
+    # ── D. PM2 log rotation module ────────────────────────────────────────────
     if $INSTALL_PM2; then
         su - "$USERNAME" -c "
             export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"
@@ -719,7 +919,7 @@ setup_monitoring() {
         ok "PM2 log rotation module installed (50MB max, 10 files, compressed)."
     fi
 
-    # ── C. server_status — quick CLI overview script ──────────────────────────
+    # ── E. server_status — quick CLI overview script ──────────────────────────
     # Capture username for use inside heredoc
     local deploy_user="$USERNAME"
     cat > "$STATUS_SCRIPT" <<STATUSSCRIPT
@@ -789,15 +989,25 @@ if command -v ufw &>/dev/null; then
     echo -e "  \${GRY}\${ufw_status}\${R}"
 fi
 
-# ── Netdata ───────────────────────────────────────────────────────────────────
+# ── Grafana Dashboard ─────────────────────────────────────────────────────────
 echo ""
-echo -e "  \${BOLD}\${WHT}Real-Time Dashboard (Netdata)\${R}"
-if command -v netdata &>/dev/null; then
-    echo -e "  \${GRN}✔\${R}  Running — access via SSH tunnel:"
-    echo -e "  \${GRY}     ssh -L 19999:localhost:19999 ${deploy_user}@<server-ip>\${R}"
-    echo -e "  \${GRY}     Then open: http://localhost:19999\${R}"
+echo -e "  \${BOLD}\${WHT}Monitoring Dashboard (Grafana + Prometheus)\${R}"
+if systemctl is-active --quiet grafana-server 2>/dev/null; then
+    echo -e "  \${GRN}✔\${R}  Grafana running — access via SSH tunnel:"
+    echo -e "  \${GRY}     ssh -L 3001:localhost:3001 ${deploy_user}@<server-ip>\${R}"
+    echo -e "  \${GRY}     Then open: http://localhost:3001\${R}"
 else
-    echo -e "  \${GRY}  Netdata not installed\${R}"
+    echo -e "  \${GRY}  Grafana not running (sudo systemctl start grafana-server)\${R}"
+fi
+if systemctl is-active --quiet prometheus 2>/dev/null; then
+    echo -e "  \${GRN}✔\${R}  Prometheus running (127.0.0.1:9090)"
+else
+    echo -e "  \${GRY}  Prometheus not running (sudo systemctl start prometheus)\${R}"
+fi
+if systemctl is-active --quiet node_exporter 2>/dev/null; then
+    echo -e "  \${GRN}✔\${R}  node_exporter running (127.0.0.1:9100)"
+else
+    echo -e "  \${GRY}  node_exporter not running (sudo systemctl start node_exporter)\${R}"
 fi
 
 echo ""
@@ -907,7 +1117,7 @@ setup_firewall() {
     run "ufw default deny incoming"
     run "ufw default allow outgoing"
     run "ufw allow 22/tcp   comment 'SSH'"
-    run "ufw allow 19999/tcp comment 'Netdata — accessible via SSH tunnel only'"
+    # Monitoring ports (9090/9100/3001) are bound to 127.0.0.1 — no UFW rule needed
 
     ufw --force enable 2>/dev/null || true
 
@@ -973,7 +1183,7 @@ print_summary() {
     _row "PM2 Service"    "pm2-${USERNAME}  (systemd — auto-starts on reboot)"
     _row "SSH Access"     "password + SSH key  (both supported)"
     _row "Root Access"    "ssh ${USERNAME}@<server>  →  sudo -i  (direct root SSH blocked)"
-    _row "Monitoring"     "server_status  ·  pm2 monit  ·  Netdata :19999"
+    _row "Monitoring"     "server_status  ·  pm2 monit  ·  Grafana :3001"
 
     _sep
     printf "  ${BLU}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
@@ -1006,9 +1216,9 @@ print_summary() {
         "pm2 monit                     live Node.js process monitor (CPU/RAM)"
         "pm2 logs                      tail live app logs"
         "pm2 logs myapp --lines 200    last 200 lines for one app"
-        "Netdata real-time dashboard:"
-        "  ssh -L 19999:localhost:19999 ${USERNAME}@<server-ip>"
-        "  → open http://localhost:19999 in your browser"
+        "Grafana dashboard (beautiful, user-friendly):"
+        "  ssh -L 3001:localhost:3001 ${USERNAME}@<server-ip>"
+        "  → open http://localhost:3001  (login: admin / admin)"
     )
     for s in "${mon_steps[@]}"; do
         printf "  ${BLU}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}\n" "$s"
@@ -1055,7 +1265,7 @@ main() {
     install_git         # 07
     install_node        # 08
     install_pm2         # 09 — bulletproof
-    setup_monitoring    # 11 — Netdata + PM2 logrotate + server_status
+    setup_monitoring    # 11 — Prometheus + Grafana + PM2 logrotate + server_status
     harden_kernel       # 12
     setup_fail2ban      # 13
     setup_firewall      # 14
