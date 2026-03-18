@@ -29,13 +29,11 @@
 # ║        --no-pm2     Skip PM2                                                 ║
 # ║        --no-fw      Skip UFW                                                 ║
 # ║        --no-mon     Skip Netdata monitoring                                  ║
-# ║        --dry-run    Simulate — zero system changes                           ║
 # ║    -h  --help       Show this help and exit                                  ║
 # ║                                                                              ║
 # ║  EXAMPLES                                                                    ║
 # ║    sudo ./init.sh                         ← fully interactive                ║
 # ║    sudo ./init.sh -u mojahid -n 20        ← skip username/node prompts      ║
-# ║    sudo ./init.sh -u mojahid --dry-run    ← simulate, no changes            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -69,10 +67,10 @@ if [[ -t 1 ]] && tput colors &>/dev/null && (( $(tput colors) >= 8 )); then
     YLW=$'\033[38;5;220m'  ORG=$'\033[38;5;208m'  PRP=$'\033[38;5;141m'
     WHT=$'\033[38;5;255m'  GRY=$'\033[38;5;244m'  RED=$'\033[38;5;196m'
     TICK="${GRN}✔${R}"  CROSS="${RED}✘${R}"  WARN_IC="${YLW}⚠${R}"
-    ARROW="${CYN}›${R}"  DRY_IC="${PRP}◈${R}"
+    ARROW="${CYN}›${R}"
 else
     R='' BOLD='' DIM='' GRN='' BLU='' CYN='' YLW='' ORG='' PRP='' WHT='' GRY='' RED=''
-    TICK='[OK]' CROSS='[ERR]' WARN_IC='[WARN]' ARROW='->' DRY_IC='[DRY]'
+    TICK='[OK]' CROSS='[ERR]' WARN_IC='[WARN]' ARROW='->'
 fi
 
 readonly HR2="════════════════════════════════════════════════════════════════════════════"
@@ -86,14 +84,12 @@ _log()  { printf '[%s] [%-5s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" >> 
 ok()    { echo -e "  ${TICK}  $*";              _log INFO "$*"; }
 warn()  { echo -e "  ${WARN_IC}  ${YLW}$*${R}"; _log WARN "$*"; }
 info()  { echo -e "  ${ARROW}  ${GRY}$*${R}";   _log INFO "$*"; }
-dry()   { echo -e "  ${DRY_IC}  ${DIM}[dry-run] $*${R}"; }
 die()   { echo -e "\n  ${CROSS}  ${RED}${BOLD}FATAL: $*${R}\n" >&2; _log ERROR "$*"; exit 1; }
 
 section()     { echo ""; echo -e "  ${BLU}${BOLD}┌─ $1 / $2${R}"; echo -e "  ${BLU}${DIM}│${R}"; }
 section_end() { echo -e "  ${BLU}${DIM}└${HR:0:60}${R}"; }
 
 run() {
-    [[ "${DRY_RUN:-false}" == true ]] && { dry "$*"; return; }
     eval "$*" 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
 }
 
@@ -116,7 +112,6 @@ show_banner() {
             "  Run:  sudo ./init.sh -u <user> -n 20   (with flags)"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
-    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN MODE — Zero system changes will be made.${R}\n"
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -146,14 +141,12 @@ usage() {
         "    --no-pm2"   "Skip PM2 installation" \
         "    --no-fw"    "Skip UFW firewall configuration" \
         "    --no-mon"   "Skip Netdata monitoring installation" \
-        "    --dry-run"  "Simulate every step — zero system changes" \
         "-h  --help"     "Show this help and exit"
     echo ""
     echo -e "  ${BOLD}${WHT}Examples${R}"
     echo -e "  ${GRY}${HR:0:60}${R}"
     echo -e "    ${GRN}sudo ./init.sh${R}                          ${GRY}# interactive wizard${R}"
     echo -e "    ${GRN}sudo ./init.sh -u mojahid -n 20${R}         ${GRY}# set user + Node version${R}"
-    echo -e "    ${GRN}sudo ./init.sh -u mojahid --dry-run${R}     ${GRY}# simulate, no changes${R}"
     echo -e "    ${GRN}sudo ./init.sh -u deploy -k ~/.ssh/id_rsa.pub${R}  ${GRY}# with SSH key${R}"
     echo ""
     exit 0
@@ -166,7 +159,7 @@ usage() {
 parse_args() {
     USERNAME="" CUSTOM_PASS="" SSH_PUBKEY="" NODE_VER="20"
     INSTALL_NVM=true INSTALL_PM2=true
-    GEN_FW=true SETUP_MON=true DRY_RUN=false
+    GEN_FW=true SETUP_MON=true
 
     # Parse any flags that were passed
     while [[ $# -gt 0 ]]; do
@@ -179,7 +172,6 @@ parse_args() {
             --no-pm2)   INSTALL_PM2=false;    shift ;;
             --no-fw)    GEN_FW=false;         shift ;;
             --no-mon)   SETUP_MON=false;      shift ;;
-            --dry-run)  DRY_RUN=true;         shift ;;
             -h|--help)  usage ;;
             *)          die "Unknown option: '$1'. Use -h for help." ;;
         esac
@@ -335,7 +327,6 @@ prompt_inputs() {
     _conf_row "PM2"         "$(  $INSTALL_PM2 && echo "✔ install" || echo "– skip (--no-pm2)")"
     _conf_row "UFW"         "$(  $GEN_FW      && echo "✔ configure" || echo "– skip (--no-fw)")"
     _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Netdata + PM2 + server_status" || echo "– skip (--no-mon)")"
-    _conf_row "Dry-run"     "$(  $DRY_RUN     && echo "YES — simulate only, NO changes" || echo "no — live run")"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
@@ -425,8 +416,7 @@ create_user() {
     run "$cmd"
     ok "User '$USERNAME' created → /home/$USERNAME"
 
-    if $DRY_RUN; then dry "Set password for $USERNAME"
-    else echo "$USERNAME:$PASSWORD" | chpasswd; fi
+    echo "$USERNAME:$PASSWORD" | chpasswd
     ok "Password set."
 
     section_end
@@ -439,49 +429,38 @@ create_user() {
 setup_ssh() {
     section "03" "SSH — Password + Key Auth"
 
-    if $DRY_RUN; then dry "Setup .ssh dir, install key if provided"
-    else
-        mkdir -p "/home/$USERNAME/.ssh"
-        chmod 700 "/home/$USERNAME/.ssh"
-        chown "$USERNAME:$USERNAME" "/home/$USERNAME/.ssh"
-    fi
+    mkdir -p "/home/$USERNAME/.ssh"
+    chmod 700 "/home/$USERNAME/.ssh"
+    chown "$USERNAME:$USERNAME" "/home/$USERNAME/.ssh"
     ok ".ssh directory ready (mode 700)."
 
     if [[ -n "$SSH_PUBKEY" ]]; then
         local auth_keys="/home/$USERNAME/.ssh/authorized_keys"
-        if $DRY_RUN; then dry "Install key → $auth_keys"
-        else
-            cat "$SSH_PUBKEY" >> "$auth_keys"
-            chmod 600 "$auth_keys"
-            chown "$USERNAME:$USERNAME" "$auth_keys"
-        fi
+        cat "$SSH_PUBKEY" >> "$auth_keys"
+        chmod 600 "$auth_keys"
+        chown "$USERNAME:$USERNAME" "$auth_keys"
         ok "SSH public key installed."
     fi
 
     local sshd_conf="/etc/ssh/sshd_config"
     if [[ -f "$sshd_conf" ]]; then
-        if $DRY_RUN; then
-            dry "PasswordAuthentication yes — allow password login"
-            dry "PermitRootLogin no     — block direct root SSH"
+        # Enable password auth for the deploy user
+        sed -i 's/^\s*PasswordAuthentication\s\+no/PasswordAuthentication yes/' "$sshd_conf" 2>/dev/null || true
+        grep -qiE '^\s*PasswordAuthentication\s+yes' "$sshd_conf" \
+            || echo "PasswordAuthentication yes" >> "$sshd_conf"
+
+        # BLOCK root SSH login entirely.
+        # The correct workflow is:
+        #   ssh mojahid@server  →  sudo -i  (becomes root with audit trail)
+        # Direct root SSH is disabled — no audit trail, no accountability.
+        sed -i 's/^\s*PermitRootLogin\s\+yes/PermitRootLogin no/' "$sshd_conf" 2>/dev/null || true
+        if grep -qiE '^\s*PermitRootLogin' "$sshd_conf" 2>/dev/null; then
+            sed -i 's/^\s*PermitRootLogin.*/PermitRootLogin no/' "$sshd_conf"
         else
-            # Enable password auth for the deploy user
-            sed -i 's/^\s*PasswordAuthentication\s\+no/PasswordAuthentication yes/' "$sshd_conf" 2>/dev/null || true
-            grep -qiE '^\s*PasswordAuthentication\s+yes' "$sshd_conf" \
-                || echo "PasswordAuthentication yes" >> "$sshd_conf"
-
-            # BLOCK root SSH login entirely.
-            # The correct workflow is:
-            #   ssh mojahid@server  →  sudo -i  (becomes root with audit trail)
-            # Direct root SSH is disabled — no audit trail, no accountability.
-            sed -i 's/^\s*PermitRootLogin\s\+yes/PermitRootLogin no/' "$sshd_conf" 2>/dev/null || true
-            if grep -qiE '^\s*PermitRootLogin' "$sshd_conf" 2>/dev/null; then
-                sed -i 's/^\s*PermitRootLogin.*/PermitRootLogin no/' "$sshd_conf"
-            else
-                echo "PermitRootLogin no" >> "$sshd_conf"
-            fi
-
-            systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+            echo "PermitRootLogin no" >> "$sshd_conf"
         fi
+
+        systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
         ok "sshd: PasswordAuthentication=yes, PermitRootLogin=no."
     fi
 
@@ -506,9 +485,7 @@ setup_sudo() {
 
     local f="/etc/sudoers.d/90-$USERNAME"
 
-    if $DRY_RUN; then dry "Write $f (mode 440)"
-    else
-        cat > "$f" <<SUDOERS
+    cat > "$f" <<SUDOERS
 # Sudoers for: $USERNAME
 # Generated: $(date '+%Y-%m-%d %H:%M:%S') — init.sh v${SCRIPT_VERSION}
 
@@ -537,7 +514,6 @@ $USERNAME ALL=(ALL) NOPASSWD: /usr/bin/apt
 SUDOERS
         chmod 440 "$f"
         visudo -cf "$f" &>/dev/null || { rm -f "$f"; die "Sudoers syntax error."; }
-    fi
 
     ok "Sudoers written."
     ok "Full root:                 sudo -i  or  sudo su -        (root password required)"
@@ -556,9 +532,7 @@ setup_shell() {
 
     local profile="/home/$USERNAME/.deploy_env"
 
-    if $DRY_RUN; then dry "Write $profile"
-    else
-        cat > "$profile" << 'PROFILE'
+    cat > "$profile" << 'PROFILE'
 # Deploy environment — init.sh
 umask 022
 
@@ -600,7 +574,6 @@ PROFILE
         local bashrc="/home/$USERNAME/.bashrc"
         grep -q "deploy_env" "$bashrc" 2>/dev/null \
             || printf '\n[[ -f ~/.deploy_env ]] && source ~/.deploy_env\n' >> "$bashrc"
-    fi
 
     ok "Shell profile written. Aliases: pull, gs, gl, logs, pstatus, psave, status."
 
@@ -617,7 +590,7 @@ install_git() {
     if command -v git &>/dev/null; then
         ok "Git already installed: $(git --version)"
     else
-        $DRY_RUN || apt-get install -y git 2>&1 | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        apt-get install -y git 2>&1 | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         ok "Git installed."
     fi
 
@@ -636,9 +609,7 @@ install_node() {
 
     section "07" "NVM + Node.js ${NODE_VER}"
 
-    if $DRY_RUN; then dry "Install NVM $NVM_VERSION + Node $NODE_VER as $USERNAME"
-    else
-        su - "$USERNAME" -c "
+    su - "$USERNAME" -c "
             set -e
             export NVM_DIR=\"\$HOME/.nvm\"
             curl -fsSL '$NVM_URL' | bash
@@ -649,7 +620,6 @@ install_node() {
             echo \"Node: \$(node --version)  NPM: \$(npm --version)\"
         " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done \
             || die "Node.js install failed."
-    fi
 
     ok "Node.js v${NODE_VER} installed via NVM."
 
@@ -666,34 +636,30 @@ install_pm2() {
 
     section "08" "PM2 — Bulletproof Startup"
 
-    if $DRY_RUN; then
-        dry "npm install -g pm2 → startup systemd → enable → save"
-    else
-        su - "$USERNAME" -c "
+    su - "$USERNAME" -c "
             export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"
             npm install -g pm2
             echo \"PM2: \$(pm2 --version)\"
         " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || die "PM2 install failed."
-        ok "PM2 installed."
+    ok "PM2 installed."
 
-        local node_bin pm2_bin
-        node_bin=$(su - "$USERNAME" -c 'export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"; which node' 2>/dev/null || echo "")
-        pm2_bin=$(su -  "$USERNAME" -c 'export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"; which pm2'  2>/dev/null || echo "")
+    local node_bin pm2_bin
+    node_bin=$(su - "$USERNAME" -c 'export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"; which node' 2>/dev/null || echo "")
+    pm2_bin=$(su -  "$USERNAME" -c 'export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"; which pm2'  2>/dev/null || echo "")
 
-        if [[ -n "$pm2_bin" && -n "$node_bin" ]]; then
-            env PATH="$(dirname "$node_bin"):$PATH" \
-                "$pm2_bin" startup systemd -u "$USERNAME" --hp "/home/$USERNAME" \
-                2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-            systemctl enable "pm2-$USERNAME" 2>/dev/null \
-                && ok "systemd service 'pm2-$USERNAME' enabled." \
-                || warn "Enable failed — run manually after first pm2 start."
-        fi
+    if [[ -n "$pm2_bin" && -n "$node_bin" ]]; then
+        env PATH="$(dirname "$node_bin"):$PATH" \
+            "$pm2_bin" startup systemd -u "$USERNAME" --hp "/home/$USERNAME" \
+            2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        systemctl enable "pm2-$USERNAME" 2>/dev/null \
+            && ok "systemd service 'pm2-$USERNAME' enabled." \
+            || warn "Enable failed — run manually after first pm2 start."
+    fi
 
-        su - "$USERNAME" -c "
+    su - "$USERNAME" -c "
             export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"; pm2 save
         " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-        ok "pm2 save called."
-    fi
+    ok "pm2 save called."
 
     section_end
 }
@@ -715,30 +681,23 @@ setup_monitoring() {
 
     # ── A. Netdata — real-time server dashboard ───────────────────────────────
     info "Installing Netdata (real-time monitoring dashboard)..."
-    if $DRY_RUN; then
-        dry "Install Netdata via kickstart script"
+    if ! command -v netdata &>/dev/null; then
+        curl -fsSL https://get.netdata.cloud/kickstart.sh | bash -s -- \
+            --non-interactive \
+            --stable-channel \
+            --disable-telemetry \
+            2>&1 | tail -10 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || {
+            warn "Netdata install failed — try manually: bash <(curl -fsSL https://get.netdata.cloud/kickstart.sh)"
+        }
     else
-        if ! command -v netdata &>/dev/null; then
-            curl -fsSL https://get.netdata.cloud/kickstart.sh | bash -s -- \
-                --non-interactive \
-                --stable-channel \
-                --disable-telemetry \
-                2>&1 | tail -10 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || {
-                warn "Netdata install failed — try manually: bash <(curl -fsSL https://get.netdata.cloud/kickstart.sh)"
-            }
-        else
-            ok "Netdata already installed."
-        fi
+        ok "Netdata already installed."
     fi
 
     # Netdata runs on port 19999 by default — restrict to localhost only
     if [[ -f /etc/netdata/netdata.conf ]]; then
-        if $DRY_RUN; then dry "Restrict Netdata to localhost:19999"
-        else
-            # Bind only to localhost — access via SSH tunnel, not public internet
-            sed -i 's/.*bind to.*/\tbind to = 127.0.0.1/' /etc/netdata/netdata.conf 2>/dev/null || true
-            systemctl restart netdata 2>/dev/null || true
-        fi
+        # Bind only to localhost — access via SSH tunnel, not public internet
+        sed -i 's/.*bind to.*/\tbind to = 127.0.0.1/' /etc/netdata/netdata.conf 2>/dev/null || true
+        systemctl restart netdata 2>/dev/null || true
         ok "Netdata: bound to 127.0.0.1:19999 (localhost only)."
         info "Access dashboard via SSH tunnel:"
         info "  ssh -L 19999:localhost:19999 $USERNAME@<server-ip>"
@@ -746,7 +705,7 @@ setup_monitoring() {
     fi
 
     # ── B. PM2 log rotation module ────────────────────────────────────────────
-    if $INSTALL_PM2 && ! $DRY_RUN; then
+    if $INSTALL_PM2; then
         su - "$USERNAME" -c "
             export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"
             pm2 install pm2-logrotate 2>/dev/null || true
@@ -758,11 +717,9 @@ setup_monitoring() {
     fi
 
     # ── C. server_status — quick CLI overview script ──────────────────────────
-    if $DRY_RUN; then dry "Write $STATUS_SCRIPT"
-    else
-        # Capture username for use inside heredoc
-        local deploy_user="$USERNAME"
-        cat > "$STATUS_SCRIPT" <<STATUSSCRIPT
+    # Capture username for use inside heredoc
+    local deploy_user="$USERNAME"
+    cat > "$STATUS_SCRIPT" <<STATUSSCRIPT
 #!/usr/bin/env bash
 # server_status — Quick overview of all running projects
 # Run this anytime: server_status
@@ -850,7 +807,6 @@ STATUSSCRIPT
 
         # Allow the deploy user to run it too
         ln -sf "$STATUS_SCRIPT" "/home/$USERNAME/server_status" 2>/dev/null || true
-    fi
 
     ok "server_status script installed → $STATUS_SCRIPT"
     ok "Run from anywhere:  server_status"
@@ -865,9 +821,7 @@ STATUSSCRIPT
 harden_kernel() {
     section "11" "Kernel Hardening (sysctl)"
 
-    if $DRY_RUN; then dry "Write $SYSCTL_CONF && sysctl -p"
-    else
-        cat > "$SYSCTL_CONF" <<SYSCTL
+    cat > "$SYSCTL_CONF" <<SYSCTL
 # Kernel hardening — init.sh v${SCRIPT_VERSION}
 
 # IP spoofing protection
@@ -896,9 +850,8 @@ fs.file-max                              = 100000
 net.core.somaxconn                       = 65535
 net.ipv4.tcp_max_tw_buckets              = 1440000
 SYSCTL
-        chmod 644 "$SYSCTL_CONF"
-        sysctl -p "$SYSCTL_CONF" 2>/dev/null | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-    fi
+    chmod 644 "$SYSCTL_CONF"
+    sysctl -p "$SYSCTL_CONF" 2>/dev/null | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
 
     ok "Kernel: SYN flood, IP spoof, ICMP, file descriptor limits for Node.js."
 
@@ -917,9 +870,7 @@ setup_fail2ban() {
         section_end; return
     fi
 
-    if $DRY_RUN; then dry "Write fail2ban jail config"
-    else
-        cat > "/etc/fail2ban/jail.d/node-provision.conf" <<F2B
+    cat > "/etc/fail2ban/jail.d/node-provision.conf" <<F2B
 [sshd]
 enabled  = true
 port     = ssh
@@ -929,9 +880,8 @@ findtime = 600
 bantime  = 3600
 ignoreip = 127.0.0.1/8 ::1
 F2B
-        chmod 644 "/etc/fail2ban/jail.d/node-provision.conf"
-        systemctl restart fail2ban 2>/dev/null || true
-    fi
+    chmod 644 "/etc/fail2ban/jail.d/node-provision.conf"
+    systemctl restart fail2ban 2>/dev/null || true
 
     ok "fail2ban: ban after 5 failed SSH attempts (1 hour)."
 
@@ -956,7 +906,7 @@ setup_firewall() {
     run "ufw allow 22/tcp   comment 'SSH'"
     run "ufw allow 19999/tcp comment 'Netdata — accessible via SSH tunnel only'"
 
-    $DRY_RUN || ufw --force enable 2>/dev/null || true
+    ufw --force enable 2>/dev/null || true
 
     ok "UFW active: SSH(22) open. Allow other ports as needed."
     info "Open more ports as needed:  sudo ufw allow <port>/tcp"
@@ -971,9 +921,7 @@ setup_firewall() {
 setup_logrotate() {
     section "14" "Log Rotation"
 
-    if $DRY_RUN; then dry "Write /etc/logrotate.d/$USERNAME"
-    else
-        cat > "/etc/logrotate.d/$USERNAME" <<LOGROTATE
+    cat > "/etc/logrotate.d/$USERNAME" <<LOGROTATE
 /home/$USERNAME/.pm2/logs/*.log {
     daily
     rotate 14
@@ -990,8 +938,7 @@ setup_logrotate() {
     endscript
 }
 LOGROTATE
-        chmod 644 "/etc/logrotate.d/$USERNAME"
-    fi
+    chmod 644 "/etc/logrotate.d/$USERNAME"
 
     ok "Logrotate: PM2 logs 14-day retention, daily rotation, compressed."
 
@@ -1025,13 +972,11 @@ print_summary() {
     _row "Root Access"    "ssh ${USERNAME}@<server>  →  sudo -i  (direct root SSH blocked)"
     _row "Monitoring"     "server_status  ·  pm2 monit  ·  Netdata :19999"
 
-    if ! $DRY_RUN; then
-        _sep
-        printf "  ${BLU}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
-            "⚠  Password" "$PASSWORD"
-        printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${GRY}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
-            "" "Save this now — it will NOT be shown again."
-    fi
+    _sep
+    printf "  ${BLU}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
+        "⚠  Password" "$PASSWORD"
+    printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${GRY}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
+        "" "Save this now — it will NOT be shown again."
 
     _sep
     _hdr "🚀  Deploy Your First Node.js App  (repeat per project)"
@@ -1083,8 +1028,6 @@ print_summary() {
             "  Log file: ${LOG_FILE}"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
-
-    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN — Zero changes were made to this system.${R}\n"
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
