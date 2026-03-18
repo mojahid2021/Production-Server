@@ -412,11 +412,14 @@ create_user() {
 
     getent group "$USERNAME" &>/dev/null || run "groupadd '$USERNAME'"
 
-    local cmd="useradd --gid '$USERNAME' --shell /bin/bash --comment 'Deploy: $USERNAME' --create-home --home-dir '/home/$USERNAME' '$USERNAME'"
+    local cmd="useradd --gid '$USERNAME' --shell /bin/bash --comment 'Deploy $USERNAME' --create-home --home-dir '/home/$USERNAME' '$USERNAME'"
     run "$cmd"
     ok "User '$USERNAME' created → /home/$USERNAME"
 
-    echo "$USERNAME:$PASSWORD" | chpasswd
+    local hashed
+    hashed=$(openssl passwd -6 "$PASSWORD") || die "Failed to hash password (openssl error)."
+    [[ -n "$hashed" ]] || die "Password hash is empty — check openssl installation."
+    usermod -p "$hashed" "$USERNAME"
     ok "Password set."
 
     section_end
