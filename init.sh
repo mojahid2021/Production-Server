@@ -52,6 +52,11 @@ readonly PASS_LEN=16
 readonly SUDO_TIMEOUT=15
 readonly SYSCTL_CONF="/etc/sysctl.d/99-node-provision.conf"
 readonly STATUS_SCRIPT="/usr/local/bin/server_status"
+# Prompt behaviour: when true the script will ask for these passwords up-front.
+readonly REQUIRE_USER_PW=true
+readonly REQUIRE_ROOT_PW=true
+USER_PW=""    # captured (hidden) deploy-user password for informational/confirmation use
+ROOT_PW=""    # captured (hidden) root password for informational/confirmation use
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  COLORS
@@ -260,6 +265,31 @@ prompt_inputs() {
             *)     echo -e "  ${GRY}  Please type y or n${R}" ;;
         esac
     done
+
+    # Optional: request passwords for later stages (informational only)
+    if [[ "${REQUIRE_USER_PW}" == true ]]; then
+        _ask "(Optional) Enter deploy user's password now (hidden) — or press Enter to skip:" 
+        printf "  ${CYN}›${R}  " && read -rs USER_PW </dev/tty
+        echo "" # newline after hidden input
+        if [[ -n "$USER_PW" ]]; then
+            echo -e "  ${TICK}  Deploy-user password captured (will be used for confirmation prompts)."
+        else
+            echo -e "  ${GRY}  No deploy-user password entered — will auto-generate or prompt when needed."
+        fi
+        echo ""
+    fi
+
+    if [[ "${REQUIRE_ROOT_PW}" == true ]]; then
+        _ask "(Optional) Enter root password now (hidden) — or press Enter to skip:" 
+        printf "  ${CYN}›${R}  " && read -rs ROOT_PW </dev/tty
+        echo "" # newline after hidden input
+        if [[ -n "$ROOT_PW" ]]; then
+            echo -e "  ${TICK}  Root password captured (for confirming root/sudo actions)."
+        else
+            echo -e "  ${GRY}  No root password entered — you may be prompted later or the script will continue as running user."
+        fi
+        echo ""
+    fi
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -369,7 +399,7 @@ setup_ssh() {
     ok "SSH: password + key login ENABLED."
     warn "Root SSH login: BLOCKED — login as user, then switch to root."
     info "  1. ssh $USERNAME@<server-ip>"
-    info "  2. sudo -i               ← become root (enter YOUR OWN password, not root password)"
+    info "  2. sudo -i               ← become root (enter ROOT password)"
     info "  3. exit                  ← leave root, back to $USERNAME"
 
     section_end
@@ -396,6 +426,9 @@ setup_sudo() {
 # sudo session active for ${SUDO_TIMEOUT} minutes after password entry
 Defaults:$USERNAME  timestamp_timeout=${SUDO_TIMEOUT}
 
+# Require root's password (not the invoking user's) for sudo authentication
+Defaults:$USERNAME  rootpw
+
 # ── Full root access — REQUIRES password ─────────────────────────────
 # apt install, editing system files, systemctl etc.
 $USERNAME ALL=(ALL:ALL) ALL
@@ -418,7 +451,7 @@ SUDOERS
     fi
 
     ok "Sudoers written."
-    ok "Full root:                 sudo -i  or  sudo su -        (your own password — NOT root password)"
+    ok "Full root:                 sudo -i  or  sudo su -        (root password required)"
     ok "pm2 service:               sudo systemctl restart pm2-$USERNAME  (NO password)"
     ok "apt install:               sudo apt install <pkg>         (NO password)"
 

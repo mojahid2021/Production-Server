@@ -112,7 +112,8 @@ ssh -i ~/.ssh/id_ed25519 mojahid@your-server-ip
 
 ```bash
 ssh mojahid@your-server-ip   # step 1 — login as your user
-sudo -i                       # step 2 — enter MOJAHID'S password (your own, NOT root password)
+# Note: after provisioning this script configures sudo so `sudo -i` requires the *root* account password.
+sudo -i                       # step 2 — enter ROOT password (root account)
 # do root work here
 exit                          # step 3 — leave root, back to mojahid
 ```
@@ -131,7 +132,7 @@ exit                          # step 3 — leave root, back to mojahid
 
 The deploy user has full root access when needed, plus passwordless shortcuts for the most common operations.
 
-> **Which password does `sudo` ask for?** It asks for **your own user password** (the deploy user's password) — NOT the root password. This is how Linux sudo works.
+> **Which password does `sudo` ask for?** By default sudo asks for the calling user's password, but this provisioning config changes that behavior for the deploy user: `sudo` will require the **root account's password** for authentication (except for commands explicitly listed as `NOPASSWD`, such as `apt` and certain `systemctl` operations).
 
 | Operation | Password needed? |
 |---|---|
