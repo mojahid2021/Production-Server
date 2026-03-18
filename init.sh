@@ -1,40 +1,41 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  NODE PROVISION  v6.0.0  —  Multi-Project Edition                           ║
+# ║  init.sh  —  Node.js Production Server Provisioning  v6.0.0                 ║
 # ║  Ubuntu 20.04 / 22.04 / 24.04 LTS                                           ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║                                                                              ║
 # ║  WHAT THIS DOES                                                              ║
 # ║  01. Creates deploy user with password + SSH key access                      ║
 # ║  02. Root access via sudo (password required)                                ║
-
+# ║  03. SSH: password + key login; direct root SSH blocked                      ║
 # ║  04. Installs Git, NVM, Node.js, PM2 (bulletproof startup)                  ║
 # ║  05. Nginx base setup for MULTIPLE Node.js projects                          ║
+# ║  06. Shell profile — aliases, NVM, PM2 auto-complete                        ║
 # ║  07. Monitoring: Netdata (real-time) + PM2 dashboard + status script        ║
 # ║  08. fail2ban, sysctl hardening, UFW, logrotate                             ║
 # ║                                                                              ║
-# ║  ─────────────────────────────────────────────────────────────────────────  ║
-# ║                                                                              ║
-# ║                                                                              ║
-# ║                                                                              ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║                                                                              ║
 # ║  USAGE                                                                       ║
-# ║    sudo bash node_provision.sh -u <username> [OPTIONS]                       ║
+# ║    sudo ./init.sh                         (interactive — recommended)        ║
+# ║    sudo ./init.sh -u <username> [OPTIONS]                                    ║
 # ║                                                                              ║
 # ║  OPTIONS                                                                     ║
 # ║    -u  USERNAME     Deploy username               (required)                 ║
-# ║    -p  PASSWORD     Custom password               (auto-generated if not set)║
+# ║    -p  PASSWORD     Custom password               (auto-generated if omitted)║
 # ║    -k  PUBKEY       SSH public key file           (optional)                 ║
-# ║    -n  NODE_VER     Node.js version e.g. 20,22    (default: 20)              ║
+# ║    -n  NODE_VER     Node.js version e.g. 20, 22  (default: 20)              ║
 # ║        --no-nvm     Skip NVM + Node.js                                       ║
 # ║        --no-pm2     Skip PM2                                                 ║
 # ║        --no-fw      Skip UFW                                                 ║
 # ║        --no-mon     Skip Netdata monitoring                                  ║
 # ║        --dry-run    Simulate — zero system changes                           ║
-# ║    -h               Show this help                                           ║
+# ║    -h  --help       Show this help and exit                                  ║
 # ║                                                                              ║
-# ║  EXAMPLE                                                                     ║
-# ║    sudo bash node_provision.sh -u mojahid -n 20                              ║
+# ║  EXAMPLES                                                                    ║
+# ║    sudo ./init.sh                         ← fully interactive                ║
+# ║    sudo ./init.sh -u mojahid -n 20        ← skip username/node prompts      ║
+# ║    sudo ./init.sh -u mojahid --dry-run    ← simulate, no changes            ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
@@ -105,12 +106,17 @@ show_banner() {
     echo ""
     echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
     printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  ⚡  NODE PROVISION  v${SCRIPT_VERSION}  —  Multi-Project Edition"
+            "  ⚡  init.sh  —  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
     printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Git · PM2 · Multi-Nginx · Monitoring · Ubuntu LTS"
+            "  Ubuntu 20.04 / 22.04 / 24.04 LTS  ·  Git · NVM · PM2 · Nginx · Netdata"
+    echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
+    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  Run:  sudo ./init.sh                    (interactive)"
+    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  Run:  sudo ./init.sh -u <user> -n 20   (with flags)"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
-    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN MODE — Zero system changes.${R}\n"
+    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN MODE — Zero system changes will be made.${R}\n"
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -119,22 +125,36 @@ show_banner() {
 
 usage() {
     echo ""
-    echo -e "  ${BOLD}Usage:${R}  sudo bash node_provision.sh -u <username> [OPTIONS]"
+    echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
+    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  init.sh  —  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
+    echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
-    printf  "    ${CYN}%-20s${R}  %s\n" \
-        "-u  USERNAME"   "Deploy username (required)" \
-        "-p  PASSWORD"   "Custom password (auto-generated if not set)" \
-        "-k  PUBKEY"     "SSH public key file (optional)" \
-        "-n  NODE_VER"   "Node.js version e.g. 20, 22 (default: 20)" \
-        "    --no-nvm"   "Skip NVM + Node.js" \
-        "    --no-pm2"   "Skip PM2" \
-        "    --no-fw"    "Skip UFW" \
-        "    --no-mon"   "Skip Netdata monitoring" \
-        "    --dry-run"  "Simulate — no changes" \
-        "-h"             "Show this help"
+    echo -e "  ${BOLD}${WHT}Usage${R}"
+    echo -e "  ${GRY}${HR:0:60}${R}"
+    echo -e "    ${CYN}sudo ./init.sh${R}                          ${GRY}# fully interactive (recommended)${R}"
+    echo -e "    ${CYN}sudo ./init.sh${R} ${WHT}-u <username> [OPTIONS]${R}  ${GRY}# pass values directly${R}"
     echo ""
-    echo -e "  ${BOLD}Example:${R}"
-    echo    "    sudo bash node_provision.sh -u mojahid -n 20"
+    echo -e "  ${BOLD}${WHT}Options${R}"
+    echo -e "  ${GRY}${HR:0:60}${R}"
+    printf  "    ${CYN}%-22s${R}  ${WHT}%s${R}\n" \
+        "-u  USERNAME"   "Deploy username                       (required)" \
+        "-p  PASSWORD"   "Custom password                       (auto-generated if omitted)" \
+        "-k  PUBKEY"     "Path to SSH public key file           (optional)" \
+        "-n  NODE_VER"   "Node.js version: 18, 20, 22, lts/*   (default: 20)" \
+        "    --no-nvm"   "Skip NVM + Node.js installation" \
+        "    --no-pm2"   "Skip PM2 installation" \
+        "    --no-fw"    "Skip UFW firewall configuration" \
+        "    --no-mon"   "Skip Netdata monitoring installation" \
+        "    --dry-run"  "Simulate every step — zero system changes" \
+        "-h  --help"     "Show this help and exit"
+    echo ""
+    echo -e "  ${BOLD}${WHT}Examples${R}"
+    echo -e "  ${GRY}${HR:0:60}${R}"
+    echo -e "    ${GRN}sudo ./init.sh${R}                          ${GRY}# interactive wizard${R}"
+    echo -e "    ${GRN}sudo ./init.sh -u mojahid -n 20${R}         ${GRY}# set user + Node version${R}"
+    echo -e "    ${GRN}sudo ./init.sh -u mojahid --dry-run${R}     ${GRY}# simulate, no changes${R}"
+    echo -e "    ${GRN}sudo ./init.sh -u deploy -k ~/.ssh/id_rsa.pub${R}  ${GRY}# with SSH key${R}"
     echo ""
     exit 0
 }
@@ -186,120 +206,176 @@ get_input() {
 }
 
 prompt_inputs() {
-    # Helper: print a prompt label
-    _ask() { echo -e "  ${BLU}${BOLD}?${R}  ${WHT}$*${R}"; }
-    _hint(){ echo -e "  ${GRY}   $*${R}"; }
+    # ── Internal helpers ──────────────────────────────────────────────────────
+    # Total visible width of step borders (matches the ╔╗ box width of 76)
+    local _STEP_W=74
+    # Print a step header box with dynamic right-padding
+    _step() {
+        local num="$1" total="$2" title="$3"
+        local prefix="─ Step ${num}/${total}  ──  ${title} "
+        local pad_len=$(( _STEP_W - ${#prefix} ))
+        [[ $pad_len -lt 2 ]] && pad_len=2
+        local pad; pad=$(printf '─%.0s' $(seq 1 $pad_len))
+        echo ""
+        echo -e "  ${BLU}${BOLD}┌${prefix}${pad}${R}"
+        echo -e "  ${BLU}${BOLD}│${R}"
+    }
+    # Print a labelled hint line under a step
+    _hint() { echo -e "  ${BLU}${BOLD}│${R}  ${GRY}$*${R}"; }
+    # Close the step box — same width as _step header
+    _step_end() { echo -e "  ${BLU}${BOLD}└$(printf '─%.0s' $(seq 1 "${_STEP_W}"))${R}"; echo ""; }
+    # Print an inline prompt arrow
+    _prompt() { printf "  ${BLU}${BOLD}│${R}  ${CYN}${BOLD}❯${R}  "; }
+    # Print a success line
+    _ok()   { echo -e "  ${BLU}${BOLD}│${R}  ${TICK}  $*"; }
+    # Print a warning line inside a step
+    _warn() { echo -e "  ${BLU}${BOLD}│${R}  ${WARN_IC}  ${YLW}$*${R}"; }
 
-    echo -e "  ${BLU}${DIM}${HR:0:60}${R}"
-    echo -e "  ${WHT}${BOLD}  Setup Configuration${R}"
-    echo -e "  ${BLU}${DIM}${HR:0:60}${R}"
+    # ── Header ────────────────────────────────────────────────────────────────
     echo ""
+    echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
+    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  ⚙   Interactive Setup Wizard"
+    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  Answer each prompt below.  Press Enter to accept any default value."
+    echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
 
-    # ── Username ──────────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # STEP 1 — Username
+    # ══════════════════════════════════════════════════════════════════════════
     if [[ -z "$USERNAME" ]]; then
+        _step 1 3 "Deploy Username"
+        _hint "The Linux user that will own and run your Node.js projects."
+        _hint "Rules: lowercase letters, digits, _ or -  ·  max 31 chars  ·  start with a letter"
+        _hint "Example:  mojahid   deploy   webadmin"
+        echo -e "  ${BLU}${BOLD}│${R}"
         while true; do
-            _ask "Deploy username:"
-            _hint "Lowercase letters, digits, _ or - only.  e.g.  mojahid"
-            printf "  ${CYN}›${R}  " && get_input && USERNAME="$REPLY"
+            _prompt && get_input && USERNAME="$REPLY"
             USERNAME="${USERNAME// /}"   # strip accidental spaces
 
             if [[ -z "$USERNAME" ]]; then
-                echo -e "  ${WARN_IC}  ${YLW}Username cannot be empty. Try again.${R}"
+                _warn "Username cannot be empty. Please try again."
                 continue
             fi
             if ! [[ "$USERNAME" =~ ^[a-z][a-z0-9_-]{1,30}$ ]]; then
-                echo -e "  ${WARN_IC}  ${YLW}Invalid. Must start with a letter, lowercase only, max 31 chars.${R}"
+                _warn "Invalid username — must start with a lowercase letter, max 31 chars."
                 USERNAME=""
                 continue
             fi
             if id "$USERNAME" &>/dev/null; then
-                echo -e "  ${WARN_IC}  ${YLW}User '$USERNAME' already exists. Choose a different name.${R}"
+                _warn "User '${USERNAME}' already exists on this system. Choose a different name."
                 USERNAME=""
                 continue
             fi
-            echo -e "  ${TICK}  Username: ${WHT}${BOLD}$USERNAME${R}"
+            _ok "Username set:  ${WHT}${BOLD}${USERNAME}${R}"
             break
         done
+        _step_end
+    else
+        echo ""
+        echo -e "  ${TICK}  ${GRY}Username provided via flag:${R}  ${WHT}${BOLD}${USERNAME}${R}"
         echo ""
     fi
 
-    # ── Password ──────────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    # STEP 2 — Password
+    # ══════════════════════════════════════════════════════════════════════════
     if [[ -z "$CUSTOM_PASS" ]]; then
-        _ask "Password  (press Enter to auto-generate a secure one):"
-        _hint "Leave blank for a random ${PASS_LEN}-character password."
-        printf "  ${CYN}›${R}  " && get_input -s && CUSTOM_PASS="$REPLY"
+        _step 2 3 "Deploy User Password"
+        _hint "Type a custom password, or press Enter to auto-generate a secure one."
+        _hint "Minimum 8 characters if you choose your own.  Input is hidden."
+        echo -e "  ${BLU}${BOLD}│${R}"
+        _prompt && get_input -s && CUSTOM_PASS="$REPLY"
         echo ""   # newline after hidden input
 
         if [[ -z "$CUSTOM_PASS" ]]; then
-            echo -e "  ${TICK}  Password: ${GRY}will be auto-generated${R}"
+            _ok "Password will be auto-generated  ${GRY}(${PASS_LEN} chars, mixed case + symbols)${R}"
+        elif [[ ${#CUSTOM_PASS} -lt 8 ]]; then
+            _warn "Password too short (min 8 chars) — will auto-generate a secure one instead."
+            CUSTOM_PASS=""
         else
-            if [[ ${#CUSTOM_PASS} -lt 8 ]]; then
-                echo -e "  ${WARN_IC}  ${YLW}Password too short (min 8 chars) — auto-generating instead.${R}"
-                CUSTOM_PASS=""
-            else
-                echo -e "  ${TICK}  Password: ${GRY}custom password set${R}"
-            fi
+            _ok "Custom password accepted  ${GRY}(length: ${#CUSTOM_PASS} chars — not shown again)${R}"
         fi
+        _step_end
+    else
+        echo -e "  ${TICK}  ${GRY}Password provided via flag.${R}"
         echo ""
     fi
 
-    # ── Node.js version ───────────────────────────────────────────────────────
-    _ask "Node.js version  (press Enter for default: ${NODE_VER}):"
-    _hint "Options: 18, 20, 22, lts/*  — recommended: 20"
-    printf "  ${CYN}›${R}  " && get_input && _node_input="$REPLY"
+    # ══════════════════════════════════════════════════════════════════════════
+    # STEP 3 — Node.js version
+    # ══════════════════════════════════════════════════════════════════════════
+    _step 3 3 "Node.js Version"
+    _hint "Which Node.js version to install via NVM."
+    _hint "Options: 18  20  22  lts/*     Recommended: 20"
+    _hint "Press Enter to accept the default: ${WHT}${NODE_VER}${GRY}"
+    echo -e "  ${BLU}${BOLD}│${R}"
+    _prompt && get_input && _node_input="$REPLY"
     if [[ -n "$_node_input" ]]; then
         NODE_VER="$_node_input"
     fi
-    echo -e "  ${TICK}  Node.js version: ${WHT}${BOLD}${NODE_VER}${R}"
-    echo ""
+    _ok "Node.js version:  ${WHT}${BOLD}v${NODE_VER}${R}"
+    _step_end
 
-    # ── Confirm ───────────────────────────────────────────────────────────────
-    echo -e "  ${BLU}${DIM}${HR:0:60}${R}"
-    echo -e "  ${WHT}${BOLD}  Confirm Setup${R}"
-    echo -e "  ${BLU}${DIM}${HR:0:60}${R}"
+    # ══════════════════════════════════════════════════════════════════════════
+    # CONFIRMATION SUMMARY
+    # ══════════════════════════════════════════════════════════════════════════
     echo ""
-    printf  "  ${GRY}%-18s${R}  ${WHT}%s${R}\n" \
-        "Username"    "$USERNAME" \
-        "Password"    "$([ -n "$CUSTOM_PASS" ] && echo "custom (hidden)" || echo "auto-generate")" \
-        "Node.js"     "v${NODE_VER}" \
-        "NVM"         "$(  $INSTALL_NVM && echo yes || echo skipped)" \
-        "PM2"         "$(  $INSTALL_PM2 && echo yes || echo skipped)" \
-        "Firewall"    "$(  $GEN_FW      && echo yes || echo skipped)" \
-        "Monitoring"  "$( $SETUP_MON   && echo yes || echo skipped)" \
-        "Dry-run"     "$(  $DRY_RUN     && echo YES — no changes || echo no)"
+    echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
+    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  📋  Configuration Summary — Please Review"
+    echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
+    _conf_row() {
+        printf "  ${BLU}${BOLD}║${R}  ${GRY}%-18s${R}  ${WHT}${BOLD}%-52s${R}  ${BLU}${BOLD}║${R}\n" "$1" "$2"
+    }
+    _conf_row "Username"    "$USERNAME"
+    _conf_row "Password"    "$([ -n "$CUSTOM_PASS" ] && echo "custom (hidden)" || echo "will be auto-generated")"
+    _conf_row "Node.js"     "v${NODE_VER}  (via NVM ${NVM_VERSION})"
+    _conf_row "NVM"         "$(  $INSTALL_NVM && echo "✔ install" || echo "– skip (--no-nvm)")"
+    _conf_row "PM2"         "$(  $INSTALL_PM2 && echo "✔ install" || echo "– skip (--no-pm2)")"
+    _conf_row "UFW"         "$(  $GEN_FW      && echo "✔ configure" || echo "– skip (--no-fw)")"
+    _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Netdata + PM2 + server_status" || echo "– skip (--no-mon)")"
+    _conf_row "Dry-run"     "$(  $DRY_RUN     && echo "YES — simulate only, NO changes" || echo "no — live run")"
+    echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
     while true; do
-        _ask "Proceed with provisioning?  [y/n]"
-        printf "  ${CYN}›${R}  " && get_input && _confirm="$REPLY"
+        printf "  ${CYN}${BOLD}❯${R}  ${WHT}Proceed with provisioning?${R}  ${GRY}[${R}${GRN}y${R}${GRY}/n, Enter = yes]${R}  "
+        get_input && _confirm="$REPLY"
         case "${_confirm,,}" in
-            y|yes) echo -e "  ${TICK}  Starting...\n"; break ;;
-            n|no)  echo -e "\n  ${WARN_IC}  Aborted by user.\n"; exit 0 ;;
-            *)     echo -e "  ${GRY}  Please type y or n${R}" ;;
+            y|yes) echo -e "\n  ${TICK}  ${GRN}Starting provisioning…${R}\n"; break ;;
+            n|no)  echo -e "\n  ${WARN_IC}  ${YLW}Aborted by user. No changes were made.${R}\n"; exit 0 ;;
+            "")    echo -e "\n  ${TICK}  ${GRN}Starting provisioning…${R}\n"; break ;;  # Enter = yes
+            *)     echo -e "  ${GRY}  Please type ${WHT}y${GRY} to proceed or ${WHT}n${GRY} to cancel.${R}" ;;
         esac
     done
 
-    # Optional: request passwords for later stages (informational only)
+    # Optional: capture passwords for later stages (informational only)
     if [[ "${REQUIRE_USER_PW}" == true ]]; then
-        _ask "(Optional) Enter deploy user's password now (hidden) — or press Enter to skip:" 
-        printf "  ${CYN}›${R}  " && get_input -s && USER_PW="$REPLY"
-        echo "" # newline after hidden input
+        echo -e "  ${GRY}${HR:0:60}${R}"
+        echo -e "  ${GRY}  Optional: capture passwords now for confirmation prompts later.${R}"
+        echo -e "  ${GRY}  Press Enter to skip any of these — they are not required.${R}"
+        echo -e "  ${GRY}${HR:0:60}${R}"
+        echo ""
+        printf "  ${CYN}${BOLD}❯${R}  ${WHT}Deploy-user password${R}  ${GRY}(hidden, Enter to skip):${R}  "
+        get_input -s && USER_PW="$REPLY"
+        echo ""
         if [[ -n "$USER_PW" ]]; then
-            echo -e "  ${TICK}  Deploy-user password captured (will be used for confirmation prompts)."
+            echo -e "  ${TICK}  Deploy-user password captured."
         else
-            echo -e "  ${GRY}  No deploy-user password entered — will auto-generate or prompt when needed."
+            echo -e "  ${GRY}  Skipped — will auto-generate or prompt if needed.${R}"
         fi
         echo ""
     fi
 
     if [[ "${REQUIRE_ROOT_PW}" == true ]]; then
-        _ask "(Optional) Enter root password now (hidden) — or press Enter to skip:" 
-        printf "  ${CYN}›${R}  " && get_input -s && ROOT_PW="$REPLY"
-        echo "" # newline after hidden input
+        printf "  ${CYN}${BOLD}❯${R}  ${WHT}Root / sudo password${R}  ${GRY}(hidden, Enter to skip):${R}  "
+        get_input -s && ROOT_PW="$REPLY"
+        echo ""
         if [[ -n "$ROOT_PW" ]]; then
-            echo -e "  ${TICK}  Root password captured (for confirming root/sudo actions)."
+            echo -e "  ${TICK}  Root password captured."
         else
-            echo -e "  ${GRY}  No root password entered — you may be prompted later or the script will continue as running user."
+            echo -e "  ${GRY}  Skipped — you may be prompted later if needed.${R}"
         fi
         echo ""
     fi
@@ -312,7 +388,7 @@ prompt_inputs() {
 preflight() {
     section "01" "Preflight Checks"
 
-    [[ $EUID -eq 0 ]] || die "Must run as root: sudo bash $0"
+    [[ $EUID -eq 0 ]] || die "Must run as root: sudo ./init.sh"
     ok "Running as root."
 
     [[ -f /etc/os-release ]] && { source /etc/os-release; ok "OS: ${PRETTY_NAME:-Linux}"; }
@@ -434,7 +510,7 @@ setup_sudo() {
     else
         cat > "$f" <<SUDOERS
 # Sudoers for: $USERNAME
-# Generated: $(date '+%Y-%m-%d %H:%M:%S') — node_provision.sh v${SCRIPT_VERSION}
+# Generated: $(date '+%Y-%m-%d %H:%M:%S') — init.sh v${SCRIPT_VERSION}
 
 # sudo session active for ${SUDO_TIMEOUT} minutes after password entry
 Defaults:$USERNAME  timestamp_timeout=${SUDO_TIMEOUT}
@@ -483,7 +559,7 @@ setup_shell() {
     if $DRY_RUN; then dry "Write $profile"
     else
         cat > "$profile" << 'PROFILE'
-# Deploy environment — node_provision.sh
+# Deploy environment — init.sh
 umask 022
 
 export HISTCONTROL=ignoreboth:erasedups
@@ -792,7 +868,7 @@ harden_kernel() {
     if $DRY_RUN; then dry "Write $SYSCTL_CONF && sysctl -p"
     else
         cat > "$SYSCTL_CONF" <<SYSCTL
-# Kernel hardening — node_provision.sh v${SCRIPT_VERSION}
+# Kernel hardening — init.sh v${SCRIPT_VERSION}
 
 # IP spoofing protection
 net.ipv4.conf.all.rp_filter              = 1
@@ -929,83 +1005,86 @@ LOGROTATE
 print_summary() {
     echo ""
     echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  ✦  Provisioning Complete — $USERNAME"
+    printf  "  ${BLU}${BOLD}║${R}${GRN}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  ✔  Provisioning Complete"
+    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  Your Node.js production server is ready."
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
 
-    _row() { printf "  ${BLU}${BOLD}║${R}  ${GRY}%-24s${R}  ${WHT}%-48s${R}  ${BLU}${BOLD}║${R}\n" "$1" "$2"; }
+    _row() { printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${WHT}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" "$1" "$2"; }
     _sep() { echo -e "  ${BLU}${BOLD}╠${HR2}╣${R}"; }
+    _hdr() { printf "  ${BLU}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" "$1"; }
 
+    _hdr "Server Details"
+    _sep
     _row "User"           "$USERNAME"
-    _row "Home"           "/home/$USERNAME"
-    _row "Node.js"        "v${NODE_VER} via NVM ${NVM_VERSION}"
-    _row "PM2"            "pm2-$USERNAME (systemd, auto-start on reboot)"
-    _row "SSH"            "password + key (both work)"
-    _row "Root Access"    "ssh as user → sudo -i  (no direct root SSH)"
-    _row "Monitoring"     "server_status  |  pm2 monit  |  Netdata :19999"
+    _row "Home Directory" "/home/$USERNAME"
+    _row "Node.js"        "v${NODE_VER}  (via NVM ${NVM_VERSION})"
+    _row "PM2 Service"    "pm2-${USERNAME}  (systemd — auto-starts on reboot)"
+    _row "SSH Access"     "password + SSH key  (both supported)"
+    _row "Root Access"    "ssh ${USERNAME}@<server>  →  sudo -i  (direct root SSH blocked)"
+    _row "Monitoring"     "server_status  ·  pm2 monit  ·  Netdata :19999"
 
     if ! $DRY_RUN; then
         _sep
-        printf "  ${BLU}${BOLD}║${R}  ${YLW}${BOLD}%-24s${R}  ${ORG}${BOLD}%-48s${R}  ${BLU}${BOLD}║${R}\n" \
+        printf "  ${BLU}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
             "⚠  Password" "$PASSWORD"
-        printf "  ${BLU}${BOLD}║${R}  ${GRY}%-24s${R}  %-48s  ${BLU}${BOLD}║${R}\n" \
-            "" "Save this — not shown again."
+        printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${GRY}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
+            "" "Save this now — it will NOT be shown again."
     fi
 
     _sep
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  🚀  Deploy a Node.js Project (repeat for each project)"
+    _hdr "🚀  Deploy Your First Node.js App  (repeat per project)"
     _sep
-
     local node_steps=(
-        "1. ssh $USERNAME@<server-ip>"
-        "2. git clone https://github.com/you/repo.git ~/projects/myapp"
-        "3. cd ~/projects/myapp && npm install"
-        "4. nano .env   ← add your secrets"
-        "5. pm2 start app.js --name myapp -- --port 3000"
-        "6. pm2 save    ← REQUIRED — survives server reboot"
+        "ssh ${USERNAME}@<server-ip>"
+        "git clone https://github.com/you/repo.git ~/projects/myapp"
+        "cd ~/projects/myapp && npm install"
+        "nano .env                     ← add your environment secrets"
+        "pm2 start app.js --name myapp -- --port 3000"
+        "pm2 save                      ← REQUIRED: survive reboots"
     )
+    local i=1
     for s in "${node_steps[@]}"; do
-        printf "  ${BLU}${BOLD}║${R}  ${GRN}·${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}\n" "$s"
+        printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%s.${R}  ${WHT}%-68s${R}  ${BLU}${BOLD}║${R}\n" "$i" "$s"
+        (( i++ ))
     done
 
     _sep
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  📡  Monitoring"
+    _hdr "📡  Monitoring & Health Checks"
     _sep
-
     local mon_steps=(
-        "server_status              → quick overview of everything"
-        "pm2 monit                  → live Node.js process monitor"
-        "pm2 logs                   → live app logs"
-        "Netdata dashboard:"
-        "  ssh -L 19999:localhost:19999 $USERNAME@<server-ip>"
-        "  Open browser: http://localhost:19999"
-        "  Shows: CPU, RAM, disk, network, per-process metrics in real-time"
+        "server_status                 quick overview of the whole server"
+        "pm2 monit                     live Node.js process monitor (CPU/RAM)"
+        "pm2 logs                      tail live app logs"
+        "pm2 logs myapp --lines 200    last 200 lines for one app"
+        "Netdata real-time dashboard:"
+        "  ssh -L 19999:localhost:19999 ${USERNAME}@<server-ip>"
+        "  → open http://localhost:19999 in your browser"
     )
     for s in "${mon_steps[@]}"; do
         printf "  ${BLU}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}\n" "$s"
     done
 
     _sep
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  📖  Second Project — Just Repeat"
+    _hdr "📖  Add a Second Project  (fully independent)"
     _sep
-
     local multi_steps=(
         "pm2 start app.js --name blog -- --port 4000"
-        "pm2 save"
-        "  → blog.com now points to your second app"
-        "  → totally independent from the first project"
+        "pm2 save                      ← always save after adding an app"
+        "Each app has its own port, logs, and restart policy"
     )
     for s in "${multi_steps[@]}"; do
         printf "  ${BLU}${BOLD}║${R}  ${GRN}·${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}\n" "$s"
     done
 
+    _sep
+    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  Log file: ${LOG_FILE}"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
-    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN — Zero changes made.${R}\n"
+    $DRY_RUN && echo -e "  ${PRP}${BOLD}  ◈  DRY-RUN — Zero changes were made to this system.${R}\n"
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1020,7 +1099,7 @@ main() {
     show_banner
     prompt_inputs   # ask for username, password, Node version if not passed as flags
 
-    _log INFO "=== node_provision.sh v${SCRIPT_VERSION} started. User=$USERNAME ==="
+    _log INFO "=== init.sh v${SCRIPT_VERSION} started. User=$USERNAME ==="
 
     preflight           # 01
     create_user         # 02

@@ -1,13 +1,13 @@
-# node_provision.sh
+# init.sh
 
-**Production Node.js Server Provisioning Script — v6.0.0**  
+**Production Node.js Server Provisioner — v6.0.0**  
 Ubuntu 20.04 / 22.04 / 24.04 LTS
 
 ---
 
 ## What Is This?
 
-`node_provision.sh` is a single bash script that turns a **blank Ubuntu server** into a **fully configured, production-ready Node.js hosting environment** — in one command, in under 10 minutes.
+`init.sh` is a single bash script that turns a **blank Ubuntu server** into a **fully configured, production-ready Node.js hosting environment** — in one command, in under 10 minutes.
 
 Without this script, setting up a server properly takes 3–5 hours and requires deep knowledge of Linux, SSH, Nginx, PM2, systemd, firewall configuration, and monitoring tools. This script handles all of it automatically, correctly, and consistently every time.
 
@@ -33,14 +33,15 @@ git clone → npm install → pm2 start → nginx_add_site
 ## Quick Start
 
 ```bash
-# Download the script
-wget https://your-repo/node_provision.sh
+# Download and make executable
+wget https://your-repo/init.sh
+chmod +x init.sh
 
 # Run interactively (recommended)
-sudo bash node_provision.sh
+sudo ./init.sh
 
 # Or pass values directly (skips prompts for those values)
-sudo bash node_provision.sh -u mojahid -n 20
+sudo ./init.sh -u mojahid -n 20
 ```
 
 When run interactively, the script asks:
@@ -609,7 +610,7 @@ All aliases are available immediately after login.
 | `/etc/fail2ban/jail.d/node-provision.conf` | fail2ban SSH jail config |
 | `/etc/sysctl.d/99-node-provision.conf` | Kernel hardening sysctl settings |
 | `/etc/logrotate.d/<user>` | Log rotation rules for PM2 + Nginx logs |
-| `/var/log/node_provision.log` | Full log of everything the script did |
+| `/var/log/node_provision.log` | Full log of everything `init.sh` did |
 | `~/.ssh/authorized_keys` | Installed SSH public keys |
 
 ---
@@ -700,10 +701,10 @@ ssh-copy-id -i ~/.ssh/id_ed25519.pub mojahid@your-server-ip
 Preview every step the script will take without making a single change to the system:
 
 ```bash
-sudo bash node_provision.sh --dry-run
+sudo ./init.sh --dry-run
 
 # Or with specific flags:
-sudo bash node_provision.sh -u mojahid -n 20 --dry-run
+sudo ./init.sh -u mojahid -n 20 --dry-run
 ```
 
 Every action prints `[dry-run] <what it would do>` instead of executing. Useful for:
