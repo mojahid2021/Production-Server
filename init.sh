@@ -172,6 +172,19 @@ parse_args() {
 #  Only asks for values that were NOT already supplied via flags.
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+get_input() {
+    # Usage: get_input [-s]
+    # Reads a line into REPLY. If -s passed, reads silently (no echo).
+    local silent=false
+    if [[ "${1:-}" == "-s" ]]; then silent=true; fi
+
+    if [[ -e /dev/tty && -r /dev/tty ]]; then
+        if $silent; then read -rs REPLY </dev/tty; else read -r REPLY </dev/tty; fi
+    else
+        if $silent; then read -rs REPLY; else read -r REPLY; fi
+    fi
+}
+
 prompt_inputs() {
     # Helper: print a prompt label
     _ask() { echo -e "  ${BLU}${BOLD}?${R}  ${WHT}$*${R}"; }
@@ -187,7 +200,7 @@ prompt_inputs() {
         while true; do
             _ask "Deploy username:"
             _hint "Lowercase letters, digits, _ or - only.  e.g.  mojahid"
-            printf "  ${CYN}›${R}  " && read -r USERNAME </dev/tty
+            printf "  ${CYN}›${R}  " && get_input && USERNAME="$REPLY"
             USERNAME="${USERNAME// /}"   # strip accidental spaces
 
             if [[ -z "$USERNAME" ]]; then
@@ -214,7 +227,7 @@ prompt_inputs() {
     if [[ -z "$CUSTOM_PASS" ]]; then
         _ask "Password  (press Enter to auto-generate a secure one):"
         _hint "Leave blank for a random ${PASS_LEN}-character password."
-        printf "  ${CYN}›${R}  " && read -rs CUSTOM_PASS </dev/tty
+        printf "  ${CYN}›${R}  " && get_input -s && CUSTOM_PASS="$REPLY"
         echo ""   # newline after hidden input
 
         if [[ -z "$CUSTOM_PASS" ]]; then
@@ -233,7 +246,7 @@ prompt_inputs() {
     # ── Node.js version ───────────────────────────────────────────────────────
     _ask "Node.js version  (press Enter for default: ${NODE_VER}):"
     _hint "Options: 18, 20, 22, lts/*  — recommended: 20"
-    printf "  ${CYN}›${R}  " && read -r _node_input </dev/tty
+    printf "  ${CYN}›${R}  " && get_input && _node_input="$REPLY"
     if [[ -n "$_node_input" ]]; then
         NODE_VER="$_node_input"
     fi
@@ -258,7 +271,7 @@ prompt_inputs() {
 
     while true; do
         _ask "Proceed with provisioning?  [y/n]"
-        printf "  ${CYN}›${R}  " && read -r _confirm </dev/tty
+        printf "  ${CYN}›${R}  " && get_input && _confirm="$REPLY"
         case "${_confirm,,}" in
             y|yes) echo -e "  ${TICK}  Starting...\n"; break ;;
             n|no)  echo -e "\n  ${WARN_IC}  Aborted by user.\n"; exit 0 ;;
@@ -269,7 +282,7 @@ prompt_inputs() {
     # Optional: request passwords for later stages (informational only)
     if [[ "${REQUIRE_USER_PW}" == true ]]; then
         _ask "(Optional) Enter deploy user's password now (hidden) — or press Enter to skip:" 
-        printf "  ${CYN}›${R}  " && read -rs USER_PW </dev/tty
+        printf "  ${CYN}›${R}  " && get_input -s && USER_PW="$REPLY"
         echo "" # newline after hidden input
         if [[ -n "$USER_PW" ]]; then
             echo -e "  ${TICK}  Deploy-user password captured (will be used for confirmation prompts)."
@@ -281,7 +294,7 @@ prompt_inputs() {
 
     if [[ "${REQUIRE_ROOT_PW}" == true ]]; then
         _ask "(Optional) Enter root password now (hidden) — or press Enter to skip:" 
-        printf "  ${CYN}›${R}  " && read -rs ROOT_PW </dev/tty
+        printf "  ${CYN}›${R}  " && get_input -s && ROOT_PW="$REPLY"
         echo "" # newline after hidden input
         if [[ -n "$ROOT_PW" ]]; then
             echo -e "  ${TICK}  Root password captured (for confirming root/sudo actions)."
