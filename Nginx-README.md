@@ -1,4 +1,4 @@
-# nginx-setup.sh
+# nginx.sh — Nginx Virtual Host Setup
 
 > Interactive, production-ready Nginx domain setup script — Static · Node.js · Laravel · PHP · Any App  
 > acme.sh Multi-CA SSL · Dual-domain (no redirect) · File Upload · Security Hardened · Zero Interruption
@@ -32,12 +32,12 @@
 
 ## Overview
 
-`nginx-setup.sh` is a fully interactive bash script that sets up a complete, production-hardened Nginx virtual host in a single terminal session. It handles everything from OS detection and package installation to SSL certificate issuance, security hardening, file upload configuration, and auto-renewal — with no manual config editing required.
+`nginx.sh` is a fully interactive bash script that sets up a complete, production-hardened Nginx virtual host in a single terminal session. It handles everything from OS detection and package installation to SSL certificate issuance, security hardening, file upload configuration, and auto-renewal — with no manual config editing required.
 
 Unlike other setup scripts, it never uses certbot and never rewrites your nginx config on SSL renewal. Certificates are managed by **acme.sh** — a pure shell ACME client with no Python, no Snap, and support for multiple Certificate Authorities.
 
 ```
-sudo ./nginx-setup.sh
+sudo ./nginx.sh
 ```
 
 That is the only command you need.

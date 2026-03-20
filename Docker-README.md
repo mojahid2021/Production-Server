@@ -1,4 +1,4 @@
-# 🐳 docker.sh — Docker CE + Monitoring Integration
+# docker.sh — Docker CE + Monitoring Integration
 
 > **Companion script to `init.sh`.**
 > Installs Docker CE and connects every Docker metric and log into the Prometheus + Grafana stack already provisioned by `init.sh` — with zero manual steps.
@@ -39,15 +39,20 @@ Connects Docker completely into the Prometheus + Grafana stack installed by `ini
 init.sh already installed:        docker.sh adds:
   Prometheus   :9090          ←     docker_engine metrics  :9323
   Grafana      :3001          ←     cAdvisor metrics       :8080
-  node_exporter:9100          ←     Loki log backend       :3100
-  (untouched)                 ←     Promtail log collector
-                                    5 Docker dashboards
-                                    Loki datasource
+  node_exporter:9100          ←     Loki* log backend      :3100
+  Loki         :3100 (v7+)    ←     Promtail (Docker logs)
+  Promtail     :9080 (v7+)    ←     5 Docker dashboards
+  PM2 exporter :9209 (v7+)         Loki datasource (if not already present)
+  (all untouched)
+
+* When init.sh v7+ has already installed native Loki/Promtail, docker.sh reuses
+  the existing Loki service and routes Docker Promtail to it via host networking.
+  No port conflict, no duplicate service.
 ```
 
 ---
 
-## ✅ Prerequisites
+## Prerequisites
 
 `docker.sh` is designed to run **after** `init.sh`. The following must already be present:
 
@@ -58,8 +63,11 @@ init.sh already installed:        docker.sh adds:
 | Grafana | `init.sh` | `/etc/grafana/provisioning` · `:3001` |
 | node_exporter | `init.sh` | `127.0.0.1:9100` |
 | Deploy user | `init.sh` | `/home/<username>` |
+| Loki *(optional)* | `init.sh` ≥ v7.0.0 | `127.0.0.1:3100` |
+| Promtail *(optional)* | `init.sh` ≥ v7.0.0 | `127.0.0.1:9080` |
 
 > If Prometheus or Grafana are missing, `docker.sh` will install Docker and skip the monitoring integration, printing a clear warning.
+> When `init.sh` ≥ v7.0.0 has already installed native Loki/Promtail, `docker.sh` will reuse them instead of deploying conflicting Docker containers.
 
 ---
 
