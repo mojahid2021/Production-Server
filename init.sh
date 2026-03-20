@@ -824,6 +824,7 @@ ExecStart=/usr/local/bin/prometheus \
     --config.file=/etc/prometheus/prometheus.yml \
     --storage.tsdb.path=/var/lib/prometheus/ \
     --web.listen-address=127.0.0.1:9090 \
+    --web.enable-lifecycle \
     --web.console.templates=/etc/prometheus/consoles \
     --web.console.libraries=/etc/prometheus/console_libraries \
     --storage.tsdb.retention.time=15d
@@ -877,6 +878,7 @@ apiVersion: 1
 datasources:
   - name: Prometheus
     type: prometheus
+    uid: Prometheus
     url: http://127.0.0.1:9090
     access: proxy
     isDefault: true
@@ -895,6 +897,7 @@ apiVersion: 1
 datasources:
   - name: Loki
     type: loki
+    uid: Loki
     url: http://127.0.0.1:3100
     access: proxy
     isDefault: false
@@ -1115,6 +1118,7 @@ PM2DASH
             export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"
             pm2 install pm2-prometheus-exporter 2>/dev/null || true
             pm2 set pm2-prometheus-exporter:port 9209 2>/dev/null || true
+            pm2 save 2>/dev/null || true
         " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         ok "PM2 Prometheus exporter installed — exposes metrics on 127.0.0.1:9209."
         info "Scrape target added to Prometheus. PM2 apps appear in Grafana automatically."
@@ -1333,8 +1337,11 @@ PTCFG
                 || warn "setfacl failed for /home/${USERNAME} — Promtail may not read PM2 logs."
             setfacl -m "u:promtail:rx" "/home/${USERNAME}/.pm2" 2>/dev/null \
                 || warn "setfacl failed for /home/${USERNAME}/.pm2 — Promtail may not read PM2 logs."
-            setfacl -m "u:promtail:rx" "${pm2_log_dir}" 2>/dev/null \
-                || warn "setfacl failed for ${pm2_log_dir} — Promtail may not read PM2 logs."
+            # Set both access ACL on existing files and default ACL so new log files are readable
+            setfacl -R -m "u:promtail:rX" "${pm2_log_dir}" 2>/dev/null \
+                || warn "setfacl failed for ${pm2_log_dir} files — Promtail may not read PM2 logs."
+            setfacl -m "u:promtail:rx" -m "d:u:promtail:rx" "${pm2_log_dir}" 2>/dev/null \
+                || warn "setfacl default ACL failed for ${pm2_log_dir} — new log files may not be readable by Promtail."
         else
             warn "setfacl not available — install 'acl' package so Promtail can access PM2 log dir."
         fi
@@ -1407,7 +1414,11 @@ echo -e "  \${GRY}CPU Load (1m):\${R}  \${WHT}\${cpu_load}\${R}"
 # Memory
 mem_total=\$(free -m | awk '/^Mem:/{print \$2}')
 mem_used=\$(free  -m | awk '/^Mem:/{print \$3}')
-mem_pct=\$(( mem_used * 100 / mem_total ))
+if [[ -n "\${mem_total}" && "\${mem_total}" -gt 0 ]] 2>/dev/null; then
+    mem_pct=\$(( mem_used * 100 / mem_total ))
+else
+    mem_pct=0
+fi
 if   (( mem_pct >= 90 )); then mem_color=\$RED
 elif (( mem_pct >= 70 )); then mem_color=\$YLW
 else                           mem_color=\$GRN; fi

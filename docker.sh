@@ -846,13 +846,13 @@ datasources:
     type: loki
     access: proxy
     url: http://127.0.0.1:${LOKI_PORT}
-    uid: loki-docker
+    uid: Loki
     isDefault: false
     jsonData:
       maxLines: 5000
       timeout:  60
       derivedFields:
-        - datasourceUid: loki-docker
+        - datasourceUid: Loki
           matcherRegex: "container_id=([\\w]+)"
           name: ContainerID
           url: '\$\${__value.raw}'
@@ -861,7 +861,7 @@ datasources:
 EOF
     chown grafana:grafana "${DS_DIR}/loki-docker.yaml" 2>/dev/null || true
     ok "Loki datasource written: ${DS_DIR}/loki-docker.yaml"
-    info "URL: http://127.0.0.1:${LOKI_PORT}  |  UID: loki-docker"
+    info "URL: http://127.0.0.1:${LOKI_PORT}  |  UID: Loki"
 
     section_end
 }
