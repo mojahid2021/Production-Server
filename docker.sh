@@ -59,7 +59,8 @@ readonly MONITORING_DIR="/opt/docker-monitoring"
 readonly DOCKER_METRICS_PORT=9323      # Docker daemon metrics
 readonly CADVISOR_PORT=8080            # Per-container metrics
 readonly LOKI_PORT=3100                # Log backend
-readonly PROMTAIL_STATUS_PORT=9080     # Promtail health endpoint
+readonly PROMTAIL_STATUS_PORT=9080        # Promtail health endpoint (standalone Docker network)
+readonly PROMTAIL_DOCKER_STATUS_PORT=9081 # Promtail-docker health endpoint (host-network mode — avoids clash with native Promtail on :9080)
 # node_exporter :9100 is already running from init.sh — we never touch it
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -102,6 +103,7 @@ parse_args() {
     DEPLOY_USER="${SUDO_USER:-}"   # default: the user who ran sudo
     SETUP_MON=true                  # --no-mon disables monitoring integration
     SETUP_LOKI=true                 # --no-loki disables Loki/Promtail
+    NATIVE_LOKI=false               # set to true at runtime when init.sh's native Loki is detected
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -336,7 +338,7 @@ configure_daemon() {
     "buildkit": true
   },
   "live-restore": true,
-  "metrics-addr": "0.0.0.0:${DOCKER_METRICS_PORT}",
+  "metrics-addr": "127.0.0.1:${DOCKER_METRICS_PORT}",
   "experimental": true,
   "default-ulimits": {
     "nofile": {
@@ -357,7 +359,7 @@ EOF
     info "  BuildKit:     enabled (faster, parallel, cached builds)"
     info "  live-restore: enabled (containers survive daemon restart)"
     info "  ulimits:      nofile=64000 (Node.js-friendly file descriptor limit)"
-    info "  metrics-addr: 0.0.0.0:${DOCKER_METRICS_PORT} (Prometheus scrape endpoint)"
+    info "  metrics-addr: 127.0.0.1:${DOCKER_METRICS_PORT} (Prometheus scrape endpoint — loopback only)"
 
     if curl -sf "http://localhost:${DOCKER_METRICS_PORT}/metrics" | grep -q "engine_daemon" 2>/dev/null; then
         ok "Docker metrics endpoint live → :${DOCKER_METRICS_PORT}/metrics"
@@ -500,9 +502,9 @@ deploy_loki_promtail() {
     # an additional Loki Docker container — it would fail to bind port 3100.
     # Instead we route the Docker Promtail container to the native Loki service
     # using host networking so it can reach 127.0.0.1:3100 directly.
-    local native_loki=false
+    NATIVE_LOKI=false
     if systemctl is-active --quiet loki 2>/dev/null; then
-        native_loki=true
+        NATIVE_LOKI=true
         info "Native Loki service detected (init.sh ≥ v7.0.0) — skipping Loki container."
         info "Docker Promtail will push to native Loki on 127.0.0.1:${LOKI_PORT}."
     fi
@@ -562,16 +564,21 @@ LOKICFG
     # When native Loki is running, Promtail uses --network=host so it can reach
     # 127.0.0.1:3100 directly.  Otherwise it talks to the "loki" container name
     # via the shared Docker monitoring network.
+    # NOTE: in host-network mode we use PROMTAIL_DOCKER_STATUS_PORT (9081) to
+    # avoid a port conflict with the native Promtail service already bound to 9080.
     local loki_push_url
-    if $native_loki; then
+    local promtail_http_port
+    if $NATIVE_LOKI; then
         loki_push_url="http://127.0.0.1:${LOKI_PORT}/loki/api/v1/push"
+        promtail_http_port=${PROMTAIL_DOCKER_STATUS_PORT}
     else
         loki_push_url="http://loki:3100/loki/api/v1/push"
+        promtail_http_port=${PROMTAIL_STATUS_PORT}
     fi
 
     cat > "${MONITORING_DIR}/promtail/promtail-config.yml" <<PTCFG
 server:
-  http_listen_port: 9080
+  http_listen_port: ${promtail_http_port}
   grpc_listen_port: 0
 
 positions:
@@ -625,18 +632,18 @@ scrape_configs:
 PTCFG
 
     # ── Stop + remove any existing instances ───────────────────────────────────
-    docker rm -f promtail 2>/dev/null || true
-    if ! $native_loki; then
+    docker rm -f promtail promtail-docker 2>/dev/null || true
+    if ! $NATIVE_LOKI; then
         docker rm -f loki 2>/dev/null || true
     fi
 
     # Create shared network for loki ↔ promtail communication (skipped when using host network)
-    if ! $native_loki; then
+    if ! $NATIVE_LOKI; then
         docker network create monitoring 2>/dev/null || true
     fi
 
     # ── Deploy Loki (only when native Loki is NOT running) ────────────────────
-    if ! $native_loki; then
+    if ! $NATIVE_LOKI; then
         docker run -d \
             --name loki \
             --restart unless-stopped \
@@ -668,8 +675,9 @@ PTCFG
 
     # ── Deploy Promtail ────────────────────────────────────────────────────────
     # When native Loki is running, use --network=host so Promtail reaches :3100.
-    # Also avoid -p binding since native Promtail already occupies :9080.
-    if $native_loki; then
+    # Use PROMTAIL_DOCKER_STATUS_PORT (9081) as the http_listen_port so it does
+    # NOT conflict with the native Promtail service already bound on :9080.
+    if $NATIVE_LOKI; then
         docker run -d \
             --name promtail-docker \
             --restart unless-stopped \
@@ -700,7 +708,7 @@ PTCFG
             > /dev/null
     fi
 
-    local promtail_name; $native_loki && promtail_name="promtail-docker" || promtail_name="promtail"
+    local promtail_name; $NATIVE_LOKI && promtail_name="promtail-docker" || promtail_name="promtail"
     sleep 4
     if docker ps --filter "name=${promtail_name}" --filter "status=running" | grep -q "${promtail_name}"; then
         ok "Promtail running — collecting logs from all Docker containers."
@@ -1001,10 +1009,17 @@ verify_all() {
     _chk_ct  "cadvisor"
     _chk_ep  "cAdvisor Metrics"     "http://127.0.0.1:${CADVISOR_PORT}/metrics"       "container_cpu"
     if $SETUP_LOKI; then
-        _chk_ct  "loki"
-        _chk_ep  "Loki Ready"       "http://127.0.0.1:${LOKI_PORT}/ready"             "ready"
-        _chk_ct  "promtail"
-        _chk_ep  "Promtail Status"  "http://127.0.0.1:${PROMTAIL_STATUS_PORT}/ready"  "."
+        if $NATIVE_LOKI; then
+            _chk_svc "loki"          "Loki (native systemd)"
+            _chk_ep  "Loki Ready"    "http://127.0.0.1:${LOKI_PORT}/ready"                        "ready"
+            _chk_ct  "promtail-docker"
+            _chk_ep  "Promtail-docker Status"  "http://127.0.0.1:${PROMTAIL_DOCKER_STATUS_PORT}/ready"  "."
+        else
+            _chk_ct  "loki"
+            _chk_ep  "Loki Ready"       "http://127.0.0.1:${LOKI_PORT}/ready"             "ready"
+            _chk_ct  "promtail"
+            _chk_ep  "Promtail Status"  "http://127.0.0.1:${PROMTAIL_STATUS_PORT}/ready"  "."
+        fi
     fi
 
     echo ""
