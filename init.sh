@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║  init.sh  —  Node.js Production Server Provisioning  v6.0.0                 ║
+# ║  init.sh  —  Node.js Production Server Provisioning  v7.0.0                 ║
 # ║  Ubuntu 20.04 / 22.04 / 24.04 LTS                                           ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║                                                                              ║
@@ -13,7 +13,8 @@
 # ║  06. Git — install and configure                                             ║
 # ║  07. NVM + Node.js installation                                              ║
 # ║  08. PM2 — process manager + bulletproof systemd startup                    ║
-# ║  09. Monitoring — Prometheus + Grafana + node_exporter + status script      ║
+# ║  09. Monitoring — Prometheus + Grafana + node_exporter + PM2 exporter       ║
+# ║      + Loki (log backend) + Promtail (log agent) + status script            ║
 # ║  10. Kernel hardening (sysctl)                                               ║
 # ║  11. fail2ban — brute force SSH protection                                   ║
 # ║  12. UFW firewall                                                            ║
@@ -48,7 +49,7 @@ IFS=$'\n\t'
 #  CONFIG
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-readonly SCRIPT_VERSION="6.0.0"
+readonly SCRIPT_VERSION="7.0.0"
 readonly LOG_FILE="/var/log/node_provision.log"
 readonly NVM_VERSION="v0.40.1"
 readonly NVM_URL="https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh"
@@ -331,7 +332,7 @@ prompt_inputs() {
     _conf_row "NVM"         "$(  $INSTALL_NVM && echo "✔ install" || echo "– skip (--no-nvm)")"
     _conf_row "PM2"         "$(  $INSTALL_PM2 && echo "✔ install" || echo "– skip (--no-pm2)")"
     _conf_row "UFW"         "$(  $GEN_FW      && echo "✔ configure" || echo "– skip (--no-fw)")"
-    _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Grafana + Prometheus + PM2 + server_status" || echo "– skip (--no-mon)")"
+    _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Grafana · Prometheus · Loki · Promtail · PM2 exporter" || echo "– skip (--no-mon)")"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
@@ -781,11 +782,32 @@ scrape_configs:
   - job_name: 'node'
     static_configs:
       - targets: ['127.0.0.1:9100']
+
+  - job_name: 'pm2'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['127.0.0.1:9209']
+        labels:
+          instance: pm2_apps
 PROMCFG
         chown prometheus:prometheus /etc/prometheus/prometheus.yml
         ok "Prometheus config written to /etc/prometheus/prometheus.yml."
     else
-        ok "Prometheus config already exists."
+        # Patch existing config to add PM2 exporter job if not present
+        if ! grep -q "job_name: 'pm2'" /etc/prometheus/prometheus.yml 2>/dev/null; then
+            cat >> /etc/prometheus/prometheus.yml <<'PROMPM2'
+
+  - job_name: 'pm2'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['127.0.0.1:9209']
+        labels:
+          instance: pm2_apps
+PROMPM2
+            ok "Prometheus config patched — PM2 exporter scrape job added."
+        else
+            ok "Prometheus config already exists (PM2 job present)."
+        fi
     fi
 
     if [[ ! -f /etc/systemd/system/prometheus.service ]]; then
@@ -866,6 +888,26 @@ GFDS
         ok "Grafana: Prometheus data source already provisioned."
     fi
 
+    # Provision Loki as a Grafana data source (added after Loki is installed later)
+    if [[ ! -f /etc/grafana/provisioning/datasources/loki.yaml ]]; then
+        cat > /etc/grafana/provisioning/datasources/loki.yaml <<'GFLO'
+apiVersion: 1
+datasources:
+  - name: Loki
+    type: loki
+    url: http://127.0.0.1:3100
+    access: proxy
+    isDefault: false
+    editable: false
+    jsonData:
+      maxLines: 1000
+GFLO
+        chown grafana:grafana /etc/grafana/provisioning/datasources/loki.yaml 2>/dev/null || true
+        ok "Grafana: Loki data source provisioned."
+    else
+        ok "Grafana: Loki data source already provisioned."
+    fi
+
     # Download and provision the Node Exporter Full dashboard (Grafana.com ID 1860)
     local dash_dir="/var/lib/grafana/dashboards"
     mkdir -p "$dash_dir"
@@ -903,6 +945,151 @@ GFDB
         ok "Grafana dashboard provider provisioned."
     fi
 
+    # Provision PM2 Process Monitor dashboard
+    if [[ ! -f "${dash_dir}/pm2_apps.json" ]]; then
+        cat > "${dash_dir}/pm2_apps.json" <<'PM2DASH'
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            { "options": { "0": { "color": "red",    "index": 0, "text": "stopped"  },
+                           "1": { "color": "green",  "index": 1, "text": "online"   },
+                           "2": { "color": "yellow", "index": 2, "text": "launching" },
+                           "3": { "color": "orange", "index": 3, "text": "errored"  } },
+              "type": "value" }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red",   "value": null },
+            { "color": "green", "value": 1    }
+          ] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto" },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "pm2_process_status",
+          "instant": true,
+          "legendFormat": "{{name}}",
+          "refId": "A" }
+      ],
+      "title": "PM2 App Status",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "percent",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 2,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" },
+                   "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "pm2_process_cpu_percent",
+          "legendFormat": "{{name}} CPU %",
+          "refId": "A" }
+      ],
+      "title": "PM2 CPU Usage per App",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "bytes",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 3,
+      "options": { "legend": { "calcs": ["mean","max"], "displayMode": "table", "placement": "bottom" },
+                   "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "pm2_process_memory_bytes",
+          "legendFormat": "{{name}} Memory",
+          "refId": "A" }
+      ],
+      "title": "PM2 Memory Usage per App",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "id": 4,
+      "options": { "legend": { "calcs": ["max"], "displayMode": "table", "placement": "bottom" },
+                   "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "pm2_process_restart_count",
+          "legendFormat": "{{name}} Restarts",
+          "refId": "A" }
+      ],
+      "title": "PM2 Restart Count per App",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "Prometheus" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "s",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "id": 5,
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom" },
+                   "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "Prometheus" },
+          "expr": "pm2_process_uptime_seconds",
+          "legendFormat": "{{name}} Uptime",
+          "refId": "A" }
+      ],
+      "title": "PM2 App Uptime",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 38,
+  "tags": ["pm2", "nodejs", "process"],
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "PM2 Process Monitor",
+  "uid": "pm2-process-monitor",
+  "version": 1
+}
+PM2DASH
+        chown -R grafana:grafana "$dash_dir" 2>/dev/null || true
+        ok "Grafana: PM2 Process Monitor dashboard provisioned."
+    else
+        ok "Grafana: PM2 dashboard already present."
+    fi
+
     # Start Grafana
     systemctl daemon-reload
     systemctl enable --now grafana-server 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
@@ -922,9 +1109,265 @@ GFDB
             pm2 set pm2-logrotate:compress true 2>/dev/null || true
         " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         ok "PM2 log rotation module installed (50MB max, 10 files, compressed)."
+
+        # Install pm2-prometheus-exporter so PM2 process states appear in Grafana
+        su - "$USERNAME" -c "
+            export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"
+            pm2 install pm2-prometheus-exporter 2>/dev/null || true
+            pm2 set pm2-prometheus-exporter:port 9209 2>/dev/null || true
+        " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        ok "PM2 Prometheus exporter installed — exposes metrics on 127.0.0.1:9209."
+        info "Scrape target added to Prometheus. PM2 apps appear in Grafana automatically."
     fi
 
-    # ── E. server_status — quick CLI overview script ──────────────────────────
+    # ── E. Loki — system log backend ──────────────────────────────────────────
+    local loki_ver="3.0.0"
+    info "Installing Loki v${loki_ver} (log aggregation backend)..."
+    if ! command -v loki &>/dev/null; then
+        wget -q \
+            "https://github.com/grafana/loki/releases/download/v${loki_ver}/loki-linux-${arch}.zip" \
+            -O /tmp/loki.zip 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        if [[ -f /tmp/loki.zip ]]; then
+            cd /tmp && unzip -q loki.zip "loki-linux-${arch}" 2>/dev/null || true
+            if [[ -f "/tmp/loki-linux-${arch}" ]]; then
+                mv "/tmp/loki-linux-${arch}" /usr/local/bin/loki
+                chmod +x /usr/local/bin/loki
+                rm -f /tmp/loki.zip
+                ok "Loki binary installed → /usr/local/bin/loki"
+            else
+                warn "Loki binary not found in archive — install manually from https://github.com/grafana/loki/releases"
+            fi
+        else
+            warn "Loki download failed — install manually from https://github.com/grafana/loki/releases"
+        fi
+    else
+        ok "Loki already installed."
+    fi
+
+    useradd --no-create-home --shell /bin/false loki 2>/dev/null || true
+    mkdir -p /etc/loki /var/lib/loki
+    chown loki:loki /var/lib/loki
+
+    if [[ ! -f /etc/loki/loki.yml ]]; then
+        cat > /etc/loki/loki.yml <<'LOKICFG'
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /var/lib/loki
+  storage:
+    filesystem:
+      chunks_directory: /var/lib/loki/chunks
+      rules_directory:  /var/lib/loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+query_range:
+  results_cache:
+    cache:
+      embedded_cache:
+        enabled: true
+        max_size_mb: 100
+
+schema_config:
+  configs:
+    - from: 2020-10-24
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  retention_period: 744h
+  ingestion_rate_mb: 16
+  ingestion_burst_size_mb: 32
+
+compactor:
+  working_directory: /var/lib/loki/compactor
+  retention_enabled: true
+  delete_request_store: filesystem
+
+analytics:
+  reporting_enabled: false
+LOKICFG
+        chown loki:loki /etc/loki/loki.yml
+        ok "Loki config written to /etc/loki/loki.yml."
+    else
+        ok "Loki config already exists."
+    fi
+
+    if [[ ! -f /etc/systemd/system/loki.service ]]; then
+        cat > /etc/systemd/system/loki.service <<'LOKISVC'
+[Unit]
+Description=Loki Log Aggregation Service
+After=network.target
+
+[Service]
+User=loki
+Group=loki
+Type=simple
+ExecStart=/usr/local/bin/loki -config.file=/etc/loki/loki.yml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+LOKISVC
+        systemctl daemon-reload
+        systemctl enable --now loki 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        ok "Loki service enabled (127.0.0.1:3100)."
+    else
+        ok "Loki service already configured."
+    fi
+
+    # ── F. Promtail — log agent (system logs + PM2 logs → Loki) ───────────────
+    local promtail_ver="3.0.0"
+    info "Installing Promtail v${promtail_ver} (log collection agent)..."
+    if ! command -v promtail &>/dev/null; then
+        wget -q \
+            "https://github.com/grafana/loki/releases/download/v${promtail_ver}/promtail-linux-${arch}.zip" \
+            -O /tmp/promtail.zip 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        if [[ -f /tmp/promtail.zip ]]; then
+            cd /tmp && unzip -q promtail.zip "promtail-linux-${arch}" 2>/dev/null || true
+            if [[ -f "/tmp/promtail-linux-${arch}" ]]; then
+                mv "/tmp/promtail-linux-${arch}" /usr/local/bin/promtail
+                chmod +x /usr/local/bin/promtail
+                rm -f /tmp/promtail.zip
+                ok "Promtail binary installed → /usr/local/bin/promtail"
+            else
+                warn "Promtail binary not found in archive — install manually from https://github.com/grafana/loki/releases"
+            fi
+        else
+            warn "Promtail download failed — install manually from https://github.com/grafana/loki/releases"
+        fi
+    else
+        ok "Promtail already installed."
+    fi
+
+    useradd --no-create-home --shell /bin/false promtail 2>/dev/null || true
+    usermod -aG adm promtail 2>/dev/null || true   # read /var/log/* files
+    mkdir -p /etc/promtail /var/lib/promtail
+    chown promtail:promtail /var/lib/promtail
+
+    local pm2_log_dir="/home/${USERNAME}/.pm2/logs"
+    if [[ ! -f /etc/promtail/promtail.yml ]]; then
+        cat > /etc/promtail/promtail.yml <<PTCFG
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: warn
+
+positions:
+  filename: /var/lib/promtail/positions.yaml
+
+clients:
+  - url: http://127.0.0.1:3100/loki/api/v1/push
+
+scrape_configs:
+
+  # ── Syslog ──────────────────────────────────────────────────────────────────
+  - job_name: syslog
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job:    syslog
+          host:   $(hostname)
+          __path__: /var/log/syslog
+    pipeline_stages:
+      - match:
+          selector: '{job="syslog"}'
+          stages:
+            - regex:
+                expression: '^(?P<timestamp>\S+ \S+ \S+) (?P<host>\S+) (?P<process>\S+): (?P<message>.*)$'
+            - labels:
+                process:
+
+  # ── Auth log ─────────────────────────────────────────────────────────────────
+  - job_name: auth
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job:      auth
+          host:     $(hostname)
+          __path__: /var/log/auth.log
+
+  # ── Kernel log ───────────────────────────────────────────────────────────────
+  - job_name: kern
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job:      kern
+          host:     $(hostname)
+          __path__: /var/log/kern.log
+
+  # ── PM2 app logs ─────────────────────────────────────────────────────────────
+  - job_name: pm2
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job:      pm2
+          host:     $(hostname)
+          __path__: ${pm2_log_dir}/*.log
+    pipeline_stages:
+      - match:
+          selector: '{job="pm2"}'
+          stages:
+            - regex:
+                expression: '^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) (?P<level>\S+) (?P<message>.*)$'
+            - labels:
+                level:
+PTCFG
+        # Allow promtail to read PM2 log directory
+        setfacl -m "u:promtail:rx" "/home/${USERNAME}" 2>/dev/null || true
+        setfacl -m "u:promtail:rx" "/home/${USERNAME}/.pm2" 2>/dev/null || true
+        setfacl -m "u:promtail:rx" "${pm2_log_dir}" 2>/dev/null || true
+        chown promtail:promtail /etc/promtail/promtail.yml
+        ok "Promtail config written to /etc/promtail/promtail.yml."
+        info "Collecting: syslog, auth.log, kern.log, PM2 app logs."
+    else
+        ok "Promtail config already exists."
+    fi
+
+    if [[ ! -f /etc/systemd/system/promtail.service ]]; then
+        cat > /etc/systemd/system/promtail.service <<'PTSVC'
+[Unit]
+Description=Promtail Log Collection Agent
+After=network.target loki.service
+
+[Service]
+User=promtail
+Group=promtail
+Type=simple
+ExecStart=/usr/local/bin/promtail -config.file=/etc/promtail/promtail.yml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+PTSVC
+        systemctl daemon-reload
+        systemctl enable --now promtail 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        ok "Promtail service enabled — collecting system logs + PM2 app logs."
+    else
+        ok "Promtail service already configured."
+    fi
+
+    # Restart Grafana to pick up the new Loki datasource and PM2 dashboard
+    systemctl restart grafana-server 2>/dev/null || true
+    ok "Grafana restarted — Loki datasource + PM2 dashboard now active."
+
+    # ── G. server_status — quick CLI overview script ──────────────────────────
     # Capture username for use inside heredoc
     local deploy_user="$USERNAME"
     cat > "$STATUS_SCRIPT" <<STATUSSCRIPT
@@ -994,6 +1437,20 @@ if command -v ufw &>/dev/null; then
     echo -e "  \${GRY}\${ufw_status}\${R}"
 fi
 
+# ── Log Pipeline (Loki + Promtail) ───────────────────────────────────────────
+echo ""
+echo -e "  \${BOLD}\${WHT}Log Pipeline\${R}"
+if systemctl is-active --quiet loki 2>/dev/null; then
+    echo -e "  \${GRN}✔\${R}  Loki running    (log backend  127.0.0.1:3100)"
+else
+    echo -e "  \${RED}✘\${R}  Loki not running  (sudo systemctl start loki)"
+fi
+if systemctl is-active --quiet promtail 2>/dev/null; then
+    echo -e "  \${GRN}✔\${R}  Promtail running (log agent   127.0.0.1:9080)"
+else
+    echo -e "  \${RED}✘\${R}  Promtail not running  (sudo systemctl start promtail)"
+fi
+
 # ── Grafana Dashboard ─────────────────────────────────────────────────────────
 echo ""
 echo -e "  \${BOLD}\${WHT}Monitoring Dashboard (Grafana + Prometheus)\${R}"
@@ -1017,7 +1474,7 @@ fi
 
 echo ""
 echo -e "  \${GRY}\${HR}\${R}"
-echo -e "  \${GRY}PM2 live:   pm2 monit   │   Logs: pm2 logs   │   Nginx: nginx-logs\${R}"
+echo -e "  \${GRY}PM2 live: pm2 monit  │  App logs: pm2 logs  │  System logs: Grafana → Loki datasource\${R}"
 echo ""
 STATUSSCRIPT
 
@@ -1188,7 +1645,7 @@ print_summary() {
     _row "PM2 Service"    "pm2-${USERNAME}  (systemd — auto-starts on reboot)"
     _row "SSH Access"     "password + SSH key  (both supported)"
     _row "Root Access"    "ssh ${USERNAME}@<server>  →  sudo -i  (direct root SSH blocked)"
-    _row "Monitoring"     "server_status  ·  pm2 monit  ·  Grafana :3001"
+    _row "Monitoring"     "server_status  ·  pm2 monit  ·  Grafana :3001  ·  Loki :3100"
 
     _sep
     printf "  ${BLU}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
@@ -1221,9 +1678,11 @@ print_summary() {
         "pm2 monit                     live Node.js process monitor (CPU/RAM)"
         "pm2 logs                      tail live app logs"
         "pm2 logs myapp --lines 200    last 200 lines for one app"
-        "Grafana dashboard (beautiful, user-friendly):"
+        "Grafana dashboard (system metrics + PM2 + logs — all in one):"
         "  ssh -L 3001:localhost:3001 ${USERNAME}@<server-ip>"
-        "  → open http://localhost:3001  (login: admin / admin)"
+        "  → http://localhost:3001  (admin/admin — change on first login)"
+        "  Dashboards: System → Node Exporter Full | Apps → PM2 Process Monitor"
+        "  Logs:       Explore → select Loki → query {job='pm2'} or {job='syslog'}"
     )
     for s in "${mon_steps[@]}"; do
         printf "  ${BLU}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}\n" "$s"
