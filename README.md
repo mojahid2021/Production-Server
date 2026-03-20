@@ -34,7 +34,7 @@ git clone → npm install → pm2 start → nginx_add_site
 
 ```bash
 # Download and make executable
-wget https://your-repo/init.sh
+wget https://raw.githubusercontent.com/mojahid2021/Production-Server/main/init.sh
 chmod +x init.sh
 
 # Run interactively (recommended)
@@ -64,10 +64,8 @@ A confirmation summary is shown before anything happens. You type `y` to proceed
 | `-n NODE_VER` | Node.js version: `18`, `20`, `22`, `lts/*` | `20` |
 | `--no-nvm` | Skip NVM + Node.js installation | — |
 | `--no-pm2` | Skip PM2 installation | — |
-| `--no-nginx` | Skip Nginx base setup | — |
 | `--no-fw` | Skip UFW firewall configuration | — |
 | `--no-mon` | Skip Grafana/Prometheus monitoring installation | — |
-| `--dry-run` | Simulate every step — zero system changes | — |
 | `-h` | Show help and exit | — |
 
 ---
@@ -230,7 +228,9 @@ psave     # pm2 save
 
 ---
 
-### 8. Nginx — Multi-Project Reverse Proxy
+### 8. Nginx — Multi-Project Reverse Proxy (via `nginx.sh`)
+
+> **Note:** Nginx setup is handled by the companion script `nginx.sh`, not by `init.sh`. Run `init.sh` first to create the server environment, then run `sudo ./nginx.sh` to configure sites.
 
 #### How Nginx Works
 
@@ -706,24 +706,6 @@ sudo fail2ban-client status sshd
 ```bash
 ssh-copy-id -i ~/.ssh/id_ed25519.pub mojahid@your-server-ip
 ```
-
----
-
-## Dry Run Mode
-
-Preview every step the script will take without making a single change to the system:
-
-```bash
-sudo ./init.sh --dry-run
-
-# Or with specific flags:
-sudo ./init.sh -u mojahid -n 20 --dry-run
-```
-
-Every action prints `[dry-run] <what it would do>` instead of executing. Useful for:
-- Reviewing what the script does before running on a production server
-- Testing on an existing server without breaking anything
-- Verifying flags and options before committing
 
 ---
 

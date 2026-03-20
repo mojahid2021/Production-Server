@@ -53,7 +53,6 @@ readonly PROMETHEUS_URL="http://127.0.0.1:9090"               # bound by init.sh
 readonly GRAFANA_PROVISIONING="/etc/grafana/provisioning"     # init.sh standard path
 readonly GRAFANA_DASH_DIR="/var/lib/grafana/dashboards"       # init.sh dashboard dir
 readonly GRAFANA_URL="http://127.0.0.1:3001"                  # init.sh uses port 3001
-readonly GRAFANA_INI="/etc/grafana/grafana.ini"
 
 # ── Docker monitoring stack ────────────────────────────────────────────────────
 readonly MONITORING_DIR="/opt/docker-monitoring"
@@ -70,12 +69,12 @@ readonly PROMTAIL_STATUS_PORT=9080     # Promtail health endpoint
 if [[ -t 1 ]] && tput colors &>/dev/null && (( $(tput colors) >= 8 )); then
     R=$'\033[0m'  BOLD=$'\033[1m'  DIM=$'\033[2m'
     GRN=$'\033[38;5;82m'   BLU=$'\033[38;5;33m'   CYN=$'\033[38;5;45m'
-    YLW=$'\033[38;5;220m'  ORG=$'\033[38;5;208m'  PRP=$'\033[38;5;141m'
+    YLW=$'\033[38;5;220m'
     WHT=$'\033[38;5;255m'  GRY=$'\033[38;5;244m'  RED=$'\033[38;5;196m'
     TICK="${GRN}✔${R}"  CROSS="${RED}✘${R}"  WARN_IC="${YLW}⚠${R}"
     ARROW="${CYN}›${R}"
 else
-    R='' BOLD='' DIM='' GRN='' BLU='' CYN='' YLW='' ORG='' PRP='' WHT='' GRY='' RED=''
+    R='' BOLD='' DIM='' GRN='' BLU='' CYN='' YLW='' WHT='' GRY='' RED=''
     TICK='[OK]' CROSS='[ERR]' WARN_IC='[WARN]' ARROW='->'
 fi
 
@@ -676,7 +675,8 @@ patch_prometheus() {
     section "11" "Prometheus — Patching ${PROMETHEUS_CONFIG}"
 
     # Backup first
-    local backup="${PROMETHEUS_CONFIG}.bak.$(date +%s)"
+    local backup
+    backup="${PROMETHEUS_CONFIG}.bak.$(date +%s)"
     cp "${PROMETHEUS_CONFIG}" "${backup}"
     ok "Backup saved: ${backup}"
 

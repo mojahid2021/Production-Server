@@ -48,14 +48,14 @@ That is the only command you need.
 
 ```bash
 # 1. Download
-curl -fsSL https://raw.githubusercontent.com/your-repo/nginx-setup/main/nginx-setup.sh \
-  -o nginx-setup.sh
+curl -fsSL https://raw.githubusercontent.com/mojahid2021/Production-Server/main/nginx.sh \
+  -o nginx.sh
 
 # 2. Make executable
-chmod +x nginx-setup.sh
+chmod +x nginx.sh
 
 # 3. Run as root
-sudo ./nginx-setup.sh
+sudo ./nginx.sh
 ```
 
 The script will detect your OS, check and install all dependencies automatically, then walk you through 14 interactive phases.

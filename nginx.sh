@@ -84,9 +84,6 @@ detect_os() {
 check_dependencies() {
   section "Dependency Check"
 
-  local missing=()
-  local optional_missing=()
-
   # ── Helper: install a package ───────────────────────────────────────────────
   pkg_install() {
     local pkg_apt="$1" pkg_dnf="${2:-$1}" pkg_pac="${3:-$1}"
@@ -389,13 +386,12 @@ collect_site_type() {
     esac
   done
 
-  FEAT_PROXY=false; PROXY_PASS=""; PROXY_PORT=""; PROXY_HOST="127.0.0.1"
-  FEAT_WEBSOCKET=false; FEAT_PHP=false; PHP_SOCK=""; PHP_FRAMEWORK=""
+  PROXY_PASS=""; PROXY_PORT=""; PROXY_HOST="127.0.0.1"
+  FEAT_WEBSOCKET=false; PHP_SOCK=""; PHP_FRAMEWORK=""
   ROOT_DIR=""
 
   case "$SITE_TYPE" in
     proxy)
-      FEAT_PROXY=true
       PROXY_HOST=$(ask_input "Backend host/IP" "127.0.0.1")
       while true; do
         PROXY_PORT=$(ask_input "Backend port (e.g. 3000, 8000, 8080)" "")
@@ -413,7 +409,6 @@ collect_site_type() {
       ensure_dir "$ROOT_DIR"
       ;;
     php)
-      FEAT_PHP=true
       sub_info "1) Laravel / Lumen  2) WordPress  3) CodeIgniter  4) Symfony  5) Raw PHP"
       read -rp "$(echo -e "${YELLOW}?${RESET} Framework [1-5] (default: 5): ")" _fw
       case "${_fw:-5}" in
@@ -677,7 +672,8 @@ generate_config() {
   mkdir -p "$sites_avail" "$sites_en"
 
   if [[ -f "$CONF_FILE" ]]; then
-    local bak="${CONF_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    local bak
+    bak="${CONF_FILE}.bak.$(date +%Y%m%d%H%M%S)"
     cp "$CONF_FILE" "$bak"
     warn "Existing config backed up → ${bak}"
   fi

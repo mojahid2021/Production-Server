@@ -5,14 +5,19 @@
 # ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║                                                                              ║
 # ║  WHAT THIS DOES                                                              ║
-# ║  01. Creates deploy user with password + SSH key access                      ║
-# ║  02. Root access via sudo (password required)                                ║
-# ║  03. SSH: password + key login; direct root SSH blocked                      ║
-# ║  04. Installs Git, NVM, Node.js, PM2 (bulletproof startup)                  ║
-# ║  05. Nginx base setup for MULTIPLE Node.js projects                          ║
-# ║  06. Shell profile — aliases, NVM, PM2 auto-complete                        ║
-# ║  07. Monitoring: Grafana + Prometheus + node_exporter + PM2 + status script ║
-# ║  08. fail2ban, sysctl hardening, UFW, logrotate                             ║
+# ║  01. Preflight — root check, OS detection, SSH key validation                ║
+# ║  02. Creates deploy user with password + SSH key access                      ║
+# ║  03. SSH — password + key login; direct root SSH blocked                     ║
+# ║  04. Sudo — full root + targeted NOPASSWD (pm2, apt)                        ║
+# ║  05. Shell profile — aliases, NVM, PM2 auto-complete                        ║
+# ║  06. Git — install and configure                                             ║
+# ║  07. NVM + Node.js installation                                              ║
+# ║  08. PM2 — process manager + bulletproof systemd startup                    ║
+# ║  09. Monitoring — Prometheus + Grafana + node_exporter + status script      ║
+# ║  10. Kernel hardening (sysctl)                                               ║
+# ║  11. fail2ban — brute force SSH protection                                   ║
+# ║  12. UFW firewall                                                            ║
+# ║  13. Log rotation (PM2 logs)                                                 ║
 # ║                                                                              ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║                                                                              ║
@@ -64,12 +69,12 @@ ROOT_PW=""    # captured (hidden) root password for informational/confirmation u
 if [[ -t 1 ]] && tput colors &>/dev/null && (( $(tput colors) >= 8 )); then
     R=$'\033[0m'  BOLD=$'\033[1m'  DIM=$'\033[2m'
     GRN=$'\033[38;5;82m'   BLU=$'\033[38;5;33m'   CYN=$'\033[38;5;45m'
-    YLW=$'\033[38;5;220m'  ORG=$'\033[38;5;208m'  PRP=$'\033[38;5;141m'
+    YLW=$'\033[38;5;220m'  ORG=$'\033[38;5;208m'
     WHT=$'\033[38;5;255m'  GRY=$'\033[38;5;244m'  RED=$'\033[38;5;196m'
     TICK="${GRN}✔${R}"  CROSS="${RED}✘${R}"  WARN_IC="${YLW}⚠${R}"
     ARROW="${CYN}›${R}"
 else
-    R='' BOLD='' DIM='' GRN='' BLU='' CYN='' YLW='' ORG='' PRP='' WHT='' GRY='' RED=''
+    R='' BOLD='' DIM='' GRN='' BLU='' CYN='' YLW='' ORG='' WHT='' GRY='' RED=''
     TICK='[OK]' CROSS='[ERR]' WARN_IC='[WARN]' ARROW='->'
 fi
 
@@ -527,7 +532,7 @@ SUDOERS
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  06 — SHELL PROFILE
+#  05 — SHELL PROFILE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 setup_shell() {
@@ -584,7 +589,7 @@ PROFILE
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  07 — GIT
+#  06 — GIT
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 install_git() {
@@ -604,7 +609,7 @@ install_git() {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  08 — NVM + NODE
+#  07 — NVM + NODE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 install_node() {
@@ -630,7 +635,7 @@ install_node() {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  09 — PM2
+#  08 — PM2
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 install_pm2() {
@@ -669,7 +674,7 @@ install_pm2() {
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  11 — MONITORING
+#  09 — MONITORING
 #
 #  Five layers:
 #    A. node_exporter  — system metrics collector (CPU, RAM, disk, network)
@@ -680,9 +685,9 @@ install_pm2() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 setup_monitoring() {
-    $SETUP_MON || { section "10" "Monitoring"; warn "Skipped (--no-mon)."; section_end; return; }
+    $SETUP_MON || { section "09" "Monitoring"; warn "Skipped (--no-mon)."; section_end; return; }
 
-    section "10" "Monitoring — Prometheus + Grafana + PM2 + Status Script"
+    section "09" "Monitoring — Prometheus + Grafana + PM2 + Status Script"
 
     # Detect system architecture once (used by Prometheus and node_exporter)
     local arch
@@ -1028,11 +1033,11 @@ STATUSSCRIPT
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  12 — KERNEL HARDENING
+#  10 — KERNEL HARDENING
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 harden_kernel() {
-    section "11" "Kernel Hardening (sysctl)"
+    section "10" "Kernel Hardening (sysctl)"
 
     cat > "$SYSCTL_CONF" <<SYSCTL
 # Kernel hardening — init.sh v${SCRIPT_VERSION}
@@ -1072,11 +1077,11 @@ SYSCTL
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  13 — FAIL2BAN
+#  11 — FAIL2BAN
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 setup_fail2ban() {
-    section "12" "fail2ban — Brute Force Protection"
+    section "11" "fail2ban — Brute Force Protection"
 
     if ! command -v fail2ban-server &>/dev/null; then
         warn "fail2ban not installed: apt-get install -y fail2ban"
@@ -1102,13 +1107,13 @@ F2B
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  14 — UFW
+#  12 — UFW
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 setup_firewall() {
-    $GEN_FW || { section "13" "UFW"; warn "Skipped."; section_end; return; }
+    $GEN_FW || { section "12" "UFW"; warn "Skipped."; section_end; return; }
 
-    section "13" "UFW Firewall"
+    section "12" "UFW Firewall"
 
     if ! command -v ufw &>/dev/null; then
         warn "UFW not installed: apt-get install -y ufw"; section_end; return
@@ -1128,11 +1133,11 @@ setup_firewall() {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  15 — LOGROTATE
+#  13 — LOGROTATE
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 setup_logrotate() {
-    section "14" "Log Rotation"
+    section "13" "Log Rotation"
 
     cat > "/etc/logrotate.d/$USERNAME" <<LOGROTATE
 /home/$USERNAME/.pm2/logs/*.log {
@@ -1159,7 +1164,7 @@ LOGROTATE
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  16 — SUMMARY
+#  14 — SUMMARY
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 print_summary() {
@@ -1261,16 +1266,16 @@ main() {
     create_user         # 02
     setup_ssh           # 03 — password + key; root SSH blocked
     setup_sudo          # 04 — full root + targeted NOPASSWD
-    setup_shell         # 06 — aliases, NVM, PM2
-    install_git         # 07
-    install_node        # 08
-    install_pm2         # 09 — bulletproof
-    setup_monitoring    # 11 — Prometheus + Grafana + PM2 logrotate + server_status
-    harden_kernel       # 12
-    setup_fail2ban      # 13
-    setup_firewall      # 14
-    setup_logrotate     # 15
-    print_summary       # 16
+    setup_shell         # 05 — aliases, NVM, PM2
+    install_git         # 06
+    install_node        # 07
+    install_pm2         # 08 — bulletproof
+    setup_monitoring    # 09 — Prometheus + Grafana + PM2 logrotate + server_status
+    harden_kernel       # 10
+    setup_fail2ban      # 11
+    setup_firewall      # 12
+    setup_logrotate     # 13
+    print_summary       # 14
 
     _log INFO "=== Provisioning complete. User=$USERNAME ==="
 }
