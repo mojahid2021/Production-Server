@@ -495,10 +495,22 @@ deploy_loki_promtail() {
 
     section "10" "Loki + Promtail — Docker Log Pipeline"
 
+    # ── Detect native Loki (installed by init.sh ≥ v7.0.0) ───────────────────
+    # When init.sh has already installed a native Loki service we must NOT deploy
+    # an additional Loki Docker container — it would fail to bind port 3100.
+    # Instead we route the Docker Promtail container to the native Loki service
+    # using host networking so it can reach 127.0.0.1:3100 directly.
+    local native_loki=false
+    if systemctl is-active --quiet loki 2>/dev/null; then
+        native_loki=true
+        info "Native Loki service detected (init.sh ≥ v7.0.0) — skipping Loki container."
+        info "Docker Promtail will push to native Loki on 127.0.0.1:${LOKI_PORT}."
+    fi
+
     mkdir -p "${MONITORING_DIR}"/{loki,promtail,data/loki}
     chmod 777 "${MONITORING_DIR}/data/loki"
 
-    # ── Loki config ────────────────────────────────────────────────────────────
+    # ── Loki config (only used when deploying the Docker container) ───────────
     cat > "${MONITORING_DIR}/loki/loki-config.yml" <<'LOKICFG'
 auth_enabled: false
 
@@ -547,6 +559,16 @@ compactor:
 LOKICFG
 
     # ── Promtail config ────────────────────────────────────────────────────────
+    # When native Loki is running, Promtail uses --network=host so it can reach
+    # 127.0.0.1:3100 directly.  Otherwise it talks to the "loki" container name
+    # via the shared Docker monitoring network.
+    local loki_push_url
+    if $native_loki; then
+        loki_push_url="http://127.0.0.1:${LOKI_PORT}/loki/api/v1/push"
+    else
+        loki_push_url="http://loki:3100/loki/api/v1/push"
+    fi
+
     cat > "${MONITORING_DIR}/promtail/promtail-config.yml" <<PTCFG
 server:
   http_listen_port: 9080
@@ -556,7 +578,7 @@ positions:
   filename: /tmp/positions.yaml
 
 clients:
-  - url: http://loki:3100/loki/api/v1/push
+  - url: ${loki_push_url}
 
 scrape_configs:
 
@@ -603,61 +625,89 @@ scrape_configs:
 PTCFG
 
     # ── Stop + remove any existing instances ───────────────────────────────────
-    docker rm -f loki promtail 2>/dev/null || true
+    docker rm -f promtail 2>/dev/null || true
+    if ! $native_loki; then
+        docker rm -f loki 2>/dev/null || true
+    fi
 
-    # Create shared network for loki ↔ promtail communication
-    docker network create monitoring 2>/dev/null || true
+    # Create shared network for loki ↔ promtail communication (skipped when using host network)
+    if ! $native_loki; then
+        docker network create monitoring 2>/dev/null || true
+    fi
 
-    # ── Deploy Loki ────────────────────────────────────────────────────────────
-    docker run -d \
-        --name loki \
-        --restart unless-stopped \
-        --network monitoring \
-        -p "127.0.0.1:${LOKI_PORT}:3100" \
-        -v "${MONITORING_DIR}/loki/loki-config.yml:/etc/loki/local-config.yaml:ro" \
-        -v "${MONITORING_DIR}/data/loki:/loki" \
-        grafana/loki:latest \
-        -config.file=/etc/loki/local-config.yaml \
-        > /dev/null
+    # ── Deploy Loki (only when native Loki is NOT running) ────────────────────
+    if ! $native_loki; then
+        docker run -d \
+            --name loki \
+            --restart unless-stopped \
+            --network monitoring \
+            -p "127.0.0.1:${LOKI_PORT}:3100" \
+            -v "${MONITORING_DIR}/loki/loki-config.yml:/etc/loki/local-config.yaml:ro" \
+            -v "${MONITORING_DIR}/data/loki:/loki" \
+            grafana/loki:latest \
+            -config.file=/etc/loki/local-config.yaml \
+            > /dev/null
 
-    # ── Wait for Loki ready ────────────────────────────────────────────────────
-    info "Waiting for Loki to become ready..."
-    local retries=0
-    until curl -sf "http://127.0.0.1:${LOKI_PORT}/ready" 2>/dev/null | grep -q "ready" \
-        || (( retries++ >= 18 )); do
-        sleep 3; printf "."
-    done; echo ""
+        # ── Wait for Loki ready ────────────────────────────────────────────────────
+        info "Waiting for Loki to become ready..."
+        local retries=0
+        until curl -sf "http://127.0.0.1:${LOKI_PORT}/ready" 2>/dev/null | grep -q "ready" \
+            || (( retries++ >= 18 )); do
+            sleep 3; printf "."
+        done; echo ""
 
-    if curl -sf "http://127.0.0.1:${LOKI_PORT}/ready" 2>/dev/null | grep -q "ready"; then
-        ok "Loki is ready → http://127.0.0.1:${LOKI_PORT}"
-        info "Log retention: 31 days  |  Storage: ${MONITORING_DIR}/data/loki"
+        if curl -sf "http://127.0.0.1:${LOKI_PORT}/ready" 2>/dev/null | grep -q "ready"; then
+            ok "Loki is ready → http://127.0.0.1:${LOKI_PORT}"
+            info "Log retention: 31 days  |  Storage: ${MONITORING_DIR}/data/loki"
+        else
+            warn "Loki may still be starting: docker logs loki"
+        fi
     else
-        warn "Loki may still be starting: docker logs loki"
+        ok "Using native Loki service → http://127.0.0.1:${LOKI_PORT}"
     fi
 
     # ── Deploy Promtail ────────────────────────────────────────────────────────
-    docker run -d \
-        --name promtail \
-        --restart unless-stopped \
-        --privileged \
-        --network monitoring \
-        -p "127.0.0.1:${PROMTAIL_STATUS_PORT}:9080" \
-        -v "${MONITORING_DIR}/promtail/promtail-config.yml:/etc/promtail/config.yml:ro" \
-        -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-        -v /var/log:/var/log:ro \
-        -v /run/log/journal:/run/log/journal:ro \
-        -v /etc/machine-id:/etc/machine-id:ro \
-        grafana/promtail:latest \
-        -config.file=/etc/promtail/config.yml \
-        > /dev/null
+    # When native Loki is running, use --network=host so Promtail reaches :3100.
+    # Also avoid -p binding since native Promtail already occupies :9080.
+    if $native_loki; then
+        docker run -d \
+            --name promtail-docker \
+            --restart unless-stopped \
+            --privileged \
+            --network host \
+            -v "${MONITORING_DIR}/promtail/promtail-config.yml:/etc/promtail/config.yml:ro" \
+            -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
+            -v /var/log:/var/log:ro \
+            -v /run/log/journal:/run/log/journal:ro \
+            -v /etc/machine-id:/etc/machine-id:ro \
+            grafana/promtail:latest \
+            -config.file=/etc/promtail/config.yml \
+            > /dev/null
+    else
+        docker run -d \
+            --name promtail \
+            --restart unless-stopped \
+            --privileged \
+            --network monitoring \
+            -p "127.0.0.1:${PROMTAIL_STATUS_PORT}:9080" \
+            -v "${MONITORING_DIR}/promtail/promtail-config.yml:/etc/promtail/config.yml:ro" \
+            -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
+            -v /var/log:/var/log:ro \
+            -v /run/log/journal:/run/log/journal:ro \
+            -v /etc/machine-id:/etc/machine-id:ro \
+            grafana/promtail:latest \
+            -config.file=/etc/promtail/config.yml \
+            > /dev/null
+    fi
 
+    local promtail_name; $native_loki && promtail_name="promtail-docker" || promtail_name="promtail"
     sleep 4
-    if docker ps --filter "name=promtail" --filter "status=running" | grep -q promtail; then
+    if docker ps --filter "name=${promtail_name}" --filter "status=running" | grep -q "${promtail_name}"; then
         ok "Promtail running — collecting logs from all Docker containers."
         info "Reads: /var/lib/docker/containers/*/*-json.log"
         info "Labels: container_name, compose_project, compose_service, stream, host"
     else
-        warn "Promtail container issue: docker logs promtail"
+        warn "Promtail container issue: docker logs ${promtail_name}"
     fi
 
     section_end
@@ -770,6 +820,14 @@ provision_loki_datasource() {
 
     local DS_DIR="${GRAFANA_PROVISIONING}/datasources"
     mkdir -p "${DS_DIR}"
+
+    # If init.sh ≥ v7.0.0 already provisioned a Loki datasource at the same
+    # endpoint, skip to avoid duplicate "Loki" entries in Grafana.
+    if [[ -f "${DS_DIR}/loki.yaml" ]]; then
+        ok "Loki datasource already provisioned by init.sh — skipping."
+        info "Existing datasource: ${DS_DIR}/loki.yaml → http://127.0.0.1:${LOKI_PORT}"
+        section_end; return
+    fi
 
     cat > "${DS_DIR}/loki-docker.yaml" <<EOF
 # Provisioned by docker.sh v${SCRIPT_VERSION}
