@@ -1187,7 +1187,7 @@ schema_config:
         period: 24h
 
 limits_config:
-  retention_period: 744h
+  retention_period: 744h  # 31 days
   ingestion_rate_mb: 16
   ingestion_burst_size_mb: 32
 
@@ -1288,7 +1288,7 @@ scrape_configs:
           selector: '{job="syslog"}'
           stages:
             - regex:
-                expression: '^(?P<timestamp>\S+ \S+ \S+) (?P<host>\S+) (?P<process>\S+): (?P<message>.*)$'
+                expression: '^(?P<timestamp>\S+\s+\S+\s+\S+)\s+(?P<host>\S+)\s+(?P<process>[^:\[]+)[^\:]*:\s*(?P<message>.*)$'
             - labels:
                 process:
 
@@ -1323,14 +1323,21 @@ scrape_configs:
           selector: '{job="pm2"}'
           stages:
             - regex:
-                expression: '^(?P<timestamp>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}) (?P<level>\S+) (?P<message>.*)$'
+                expression: '^(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:\d{2})?)\s+(?P<level>\S+)\s+(?P<message>.*)$'
             - labels:
                 level:
 PTCFG
-        # Allow promtail to read PM2 log directory
-        setfacl -m "u:promtail:rx" "/home/${USERNAME}" 2>/dev/null || true
-        setfacl -m "u:promtail:rx" "/home/${USERNAME}/.pm2" 2>/dev/null || true
-        setfacl -m "u:promtail:rx" "${pm2_log_dir}" 2>/dev/null || true
+        # Allow promtail to read PM2 log directory (requires ACL support on the filesystem)
+        if command -v setfacl &>/dev/null; then
+            setfacl -m "u:promtail:rx" "/home/${USERNAME}" 2>/dev/null \
+                || warn "setfacl failed for /home/${USERNAME} — Promtail may not read PM2 logs."
+            setfacl -m "u:promtail:rx" "/home/${USERNAME}/.pm2" 2>/dev/null \
+                || warn "setfacl failed for /home/${USERNAME}/.pm2 — Promtail may not read PM2 logs."
+            setfacl -m "u:promtail:rx" "${pm2_log_dir}" 2>/dev/null \
+                || warn "setfacl failed for ${pm2_log_dir} — Promtail may not read PM2 logs."
+        else
+            warn "setfacl not available — install 'acl' package so Promtail can access PM2 log dir."
+        fi
         chown promtail:promtail /etc/promtail/promtail.yml
         ok "Promtail config written to /etc/promtail/promtail.yml."
         info "Collecting: syslog, auth.log, kern.log, PM2 app logs."
