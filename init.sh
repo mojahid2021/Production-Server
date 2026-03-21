@@ -68,15 +68,15 @@ ROOT_PW=""    # captured (hidden) root password for informational/confirmation u
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 if [[ -t 1 ]] && tput colors &>/dev/null && (( $(tput colors) >= 8 )); then
-    R=$'\033[0m'  BOLD=$'\033[1m'  DIM=$'\033[2m'
+    R=$'\033[0m'  BOLD=$'\033[1m'  DIM=$'\033[2m'  ITAL=$'\033[3m'
     GRN=$'\033[38;5;82m'   BLU=$'\033[38;5;33m'   CYN=$'\033[38;5;45m'
-    YLW=$'\033[38;5;220m'  ORG=$'\033[38;5;208m'
+    YLW=$'\033[38;5;220m'  ORG=$'\033[38;5;208m'  PRP=$'\033[38;5;135m'
     WHT=$'\033[38;5;255m'  GRY=$'\033[38;5;244m'  RED=$'\033[38;5;196m'
     TICK="${GRN}✔${R}"  CROSS="${RED}✘${R}"  WARN_IC="${YLW}⚠${R}"
-    ARROW="${CYN}›${R}"
+    ARROW="${CYN}›${R}"  BULLET="${PRP}◆${R}"
 else
-    R='' BOLD='' DIM='' GRN='' BLU='' CYN='' YLW='' ORG='' WHT='' GRY='' RED=''
-    TICK='[OK]' CROSS='[ERR]' WARN_IC='[WARN]' ARROW='->'
+    R='' BOLD='' DIM='' ITAL='' GRN='' BLU='' CYN='' YLW='' ORG='' PRP='' WHT='' GRY='' RED=''
+    TICK='[OK]' CROSS='[ERR]' WARN_IC='[WARN]' ARROW='->' BULLET='*'
 fi
 
 readonly HR2="════════════════════════════════════════════════════════════════════════════"
@@ -87,13 +87,17 @@ readonly HR="──────────────────────�
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _log()  { printf '[%s] [%-5s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" >> "$LOG_FILE" 2>/dev/null || true; }
-ok()    { echo -e "  ${TICK}  $*";              _log INFO "$*"; }
-warn()  { echo -e "  ${WARN_IC}  ${YLW}$*${R}"; _log WARN "$*"; }
-info()  { echo -e "  ${ARROW}  ${GRY}$*${R}";   _log INFO "$*"; }
+ok()    { echo -e "  ${TICK}  $*";                _log INFO "$*"; }
+warn()  { echo -e "  ${WARN_IC}  ${YLW}$*${R}";   _log WARN "$*"; }
+info()  { echo -e "  ${ARROW}  ${GRY}$*${R}";     _log INFO "$*"; }
 die()   { echo -e "\n  ${CROSS}  ${RED}${BOLD}FATAL: $*${R}\n" >&2; _log ERROR "$*"; exit 1; }
 
-section()     { echo ""; echo -e "  ${BLU}${BOLD}┌─ $1 / $2${R}"; echo -e "  ${BLU}${DIM}│${R}"; }
-section_end() { echo -e "  ${BLU}${DIM}└${HR:0:60}${R}"; }
+section()     {
+    echo ""
+    echo -e "  ${PRP}${BOLD}┌─[ ${CYN}Step $1 of 13${PRP} ]──${WHT} $2 ${PRP}${R}"
+    echo -e "  ${PRP}${DIM}│${R}"
+}
+section_end() { echo -e "  ${PRP}${DIM}└${HR:0:60}${R}"; echo ""; }
 
 run() {
     eval "$*" 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
@@ -106,17 +110,20 @@ run() {
 show_banner() {
     clear
     echo ""
-    echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  ⚡  init.sh  —  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Ubuntu 20.04 / 22.04 / 24.04 LTS  ·  Git · NVM · PM2 · Nginx · Grafana"
-    echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Run:  sudo ./init.sh                    (interactive)"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Run:  sudo ./init.sh -u <user> -n 20   (with flags)"
-    echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
+    echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
+    printf  "  ${PRP}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}${PRP}${BOLD}║${R}\n" \
+            "⚡  init.sh  —  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRY}%-74s${R}${PRP}${BOLD}║${R}\n" \
+            "Ubuntu 20.04 / 22.04 / 24.04 LTS  ·  Git · NVM · Node.js · PM2 · Grafana"
+    echo -e "${PRP}${BOLD}  ╠${HR2}╣${R}"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRN}%-14s${R}${GRY}%-62s${R}${PRP}${BOLD}║${R}\n" \
+            "  Interactive" "sudo ./init.sh"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRN}%-14s${R}${GRY}%-62s${R}${PRP}${BOLD}║${R}\n" \
+            "  With flags " "sudo ./init.sh -u <user> -n 20"
+    echo -e "${PRP}${BOLD}  ╠${HR2}╣${R}"
+    printf  "  ${PRP}${BOLD}║${R}  ${DIM}${GRY}%-74s${R}${PRP}${BOLD}║${R}\n" \
+            "github.com/mojahid2021/Production-Server"
+    echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 }
 
@@ -126,18 +133,20 @@ show_banner() {
 
 usage() {
     echo ""
-    echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  init.sh  —  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
-    echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
+    echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
+    printf  "  ${PRP}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}${PRP}${BOLD}║${R}\n" \
+            "⚡  init.sh  —  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
+    printf  "  ${PRP}${BOLD}║${R}  ${DIM}${GRY}%-74s${R}${PRP}${BOLD}║${R}\n" \
+            "github.com/mojahid2021/Production-Server"
+    echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
     echo -e "  ${BOLD}${WHT}Usage${R}"
-    echo -e "  ${GRY}${HR:0:60}${R}"
+    echo -e "  ${PRP}${DIM}${HR:0:60}${R}"
     echo -e "    ${CYN}sudo ./init.sh${R}                          ${GRY}# fully interactive (recommended)${R}"
     echo -e "    ${CYN}sudo ./init.sh${R} ${WHT}-u <username> [OPTIONS]${R}  ${GRY}# pass values directly${R}"
     echo ""
     echo -e "  ${BOLD}${WHT}Options${R}"
-    echo -e "  ${GRY}${HR:0:60}${R}"
+    echo -e "  ${PRP}${DIM}${HR:0:60}${R}"
     printf  "    ${CYN}%-22s${R}  ${WHT}%s${R}\n" \
         "-u  USERNAME"   "Deploy username                       (required)" \
         "-p  PASSWORD"   "Custom password                       (auto-generated if omitted)" \
@@ -150,7 +159,7 @@ usage() {
         "-h  --help"     "Show this help and exit"
     echo ""
     echo -e "  ${BOLD}${WHT}Examples${R}"
-    echo -e "  ${GRY}${HR:0:60}${R}"
+    echo -e "  ${PRP}${DIM}${HR:0:60}${R}"
     echo -e "    ${GRN}sudo ./init.sh${R}                          ${GRY}# interactive wizard${R}"
     echo -e "    ${GRN}sudo ./init.sh -u mojahid -n 20${R}         ${GRY}# set user + Node version${R}"
     echo -e "    ${GRN}sudo ./init.sh -u deploy -k ~/.ssh/id_rsa.pub${R}  ${GRY}# with SSH key${R}"
@@ -215,28 +224,28 @@ prompt_inputs() {
         [[ $pad_len -lt 2 ]] && pad_len=2
         local pad; pad=$(printf '─%.0s' $(seq 1 $pad_len))
         echo ""
-        echo -e "  ${BLU}${BOLD}┌${prefix}${pad}${R}"
-        echo -e "  ${BLU}${BOLD}│${R}"
+        echo -e "  ${PRP}${BOLD}┌${prefix}${pad}${R}"
+        echo -e "  ${PRP}${BOLD}│${R}"
     }
     # Print a labelled hint line under a step
-    _hint() { echo -e "  ${BLU}${BOLD}│${R}  ${GRY}$*${R}"; }
+    _hint() { echo -e "  ${PRP}${BOLD}│${R}  ${GRY}$*${R}"; }
     # Close the step box — same width as _step header
-    _step_end() { echo -e "  ${BLU}${BOLD}└$(printf '─%.0s' $(seq 1 "${_STEP_W}"))${R}"; echo ""; }
+    _step_end() { echo -e "  ${PRP}${BOLD}└$(printf '─%.0s' $(seq 1 "${_STEP_W}"))${R}"; echo ""; }
     # Print an inline prompt arrow
-    _prompt() { printf "  ${BLU}${BOLD}│${R}  ${CYN}${BOLD}❯${R}  "; }
+    _prompt() { printf "  ${PRP}${BOLD}│${R}  ${CYN}${BOLD}❯${R}  "; }
     # Print a success line
-    _ok()   { echo -e "  ${BLU}${BOLD}│${R}  ${TICK}  $*"; }
+    _ok()   { echo -e "  ${PRP}${BOLD}│${R}  ${TICK}  $*"; }
     # Print a warning line inside a step
-    _warn() { echo -e "  ${BLU}${BOLD}│${R}  ${WARN_IC}  ${YLW}$*${R}"; }
+    _warn() { echo -e "  ${PRP}${BOLD}│${R}  ${WARN_IC}  ${YLW}$*${R}"; }
 
     # ── Header ────────────────────────────────────────────────────────────────
     echo ""
-    echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  ⚙   Interactive Setup Wizard"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Answer each prompt below.  Press Enter to accept any default value."
-    echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
+    echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
+    printf  "  ${PRP}${BOLD}║${R}  ${WHT}${BOLD}%-74s${R}${PRP}${BOLD}║${R}\n" \
+            "⚙   Interactive Setup Wizard"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRY}%-74s${R}${PRP}${BOLD}║${R}\n" \
+            "Answer each prompt below.  Press Enter to accept any default value."
+    echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
 
     # ══════════════════════════════════════════════════════════════════════════
     # STEP 1 — Username
@@ -246,7 +255,7 @@ prompt_inputs() {
         _hint "The Linux user that will own and run your Node.js projects."
         _hint "Rules: lowercase letters, digits, _ or -  ·  max 31 chars  ·  start with a letter"
         _hint "Example:  mojahid   deploy   webadmin"
-        echo -e "  ${BLU}${BOLD}│${R}"
+        echo -e "  ${PRP}${BOLD}│${R}"
         while true; do
             _prompt && get_input && USERNAME="$REPLY"
             USERNAME="${USERNAME// /}"   # strip accidental spaces
@@ -282,7 +291,7 @@ prompt_inputs() {
         _step 2 3 "Deploy User Password"
         _hint "Type a custom password, or press Enter to auto-generate a secure one."
         _hint "Minimum 8 characters if you choose your own.  Input is hidden."
-        echo -e "  ${BLU}${BOLD}│${R}"
+        echo -e "  ${PRP}${BOLD}│${R}"
         _prompt && get_input -s && CUSTOM_PASS="$REPLY"
         echo ""   # newline after hidden input
 
@@ -307,7 +316,7 @@ prompt_inputs() {
     _hint "Which Node.js version to install via NVM."
     _hint "Options: 18  20  22  lts/*     Recommended: 20"
     _hint "Press Enter to accept the default: ${WHT}${NODE_VER}${GRY}"
-    echo -e "  ${BLU}${BOLD}│${R}"
+    echo -e "  ${PRP}${BOLD}│${R}"
     _prompt && get_input && _node_input="$REPLY"
     if [[ -n "$_node_input" ]]; then
         NODE_VER="$_node_input"
@@ -319,12 +328,12 @@ prompt_inputs() {
     # CONFIRMATION SUMMARY
     # ══════════════════════════════════════════════════════════════════════════
     echo ""
-    echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
+    echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
+    printf  "  ${PRP}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${PRP}${BOLD}║${R}\n" \
             "  📋  Configuration Summary — Please Review"
-    echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
+    echo -e "${PRP}${BOLD}  ╠${HR2}╣${R}"
     _conf_row() {
-        printf "  ${BLU}${BOLD}║${R}  ${GRY}%-18s${R}  ${WHT}${BOLD}%-52s${R}  ${BLU}${BOLD}║${R}\n" "$1" "$2"
+        printf "  ${PRP}${BOLD}║${R}  ${GRY}%-18s${R}  ${WHT}${BOLD}%-52s${R}  ${PRP}${BOLD}║${R}\n" "$1" "$2"
     }
     _conf_row "Username"    "$USERNAME"
     _conf_row "Password"    "$([ -n "$CUSTOM_PASS" ] && echo "custom (hidden)" || echo "will be auto-generated")"
@@ -333,7 +342,7 @@ prompt_inputs() {
     _conf_row "PM2"         "$(  $INSTALL_PM2 && echo "✔ install" || echo "– skip (--no-pm2)")"
     _conf_row "UFW"         "$(  $GEN_FW      && echo "✔ configure" || echo "– skip (--no-fw)")"
     _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Grafana · Prometheus · Loki · Promtail · PM2 exporter" || echo "– skip (--no-mon)")"
-    echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
+    echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
     while true; do
@@ -1250,21 +1259,38 @@ LOGDASH
     # ── E. Loki — system log backend ──────────────────────────────────────────
     local loki_ver="3.0.0"
     info "Installing Loki v${loki_ver} (log aggregation backend)..."
+    # Ensure unzip is available for extracting the release archive
+    if ! command -v unzip &>/dev/null; then
+        apt-get install -y unzip 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+    fi
     if ! command -v loki &>/dev/null; then
-        wget -q \
-            "https://github.com/grafana/loki/releases/download/v${loki_ver}/loki-linux-${arch}.zip" \
-            -O /tmp/loki.zip 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-        if [[ -f /tmp/loki.zip ]]; then
-            cd /tmp && unzip -q loki.zip "loki-linux-${arch}" 2>/dev/null || true
-            if [[ -f "/tmp/loki-linux-${arch}" ]]; then
-                mv "/tmp/loki-linux-${arch}" /usr/local/bin/loki
-                chmod +x /usr/local/bin/loki
-                rm -f /tmp/loki.zip
-                ok "Loki binary installed → /usr/local/bin/loki"
+        local loki_url="https://github.com/grafana/loki/releases/download/v${loki_ver}/loki-linux-${arch}.zip"
+        rm -f /tmp/loki.zip
+        # Try curl first (handles redirects better), fall back to wget
+        if command -v curl &>/dev/null; then
+            curl -fsSL "$loki_url" -o /tmp/loki.zip 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        else
+            wget -q "$loki_url" -O /tmp/loki.zip 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        fi
+        if [[ -f /tmp/loki.zip ]] && unzip -t /tmp/loki.zip &>/dev/null; then
+            # Discover the binary name inside the archive (handles naming variations)
+            local loki_bin
+            loki_bin=$(unzip -Z1 /tmp/loki.zip 2>/dev/null | grep -E '^loki-linux' | head -1) || true
+            if [[ -n "$loki_bin" ]]; then
+                cd /tmp && unzip -q loki.zip "$loki_bin" 2>/dev/null || true
+                if [[ -f "/tmp/$loki_bin" ]]; then
+                    mv "/tmp/$loki_bin" /usr/local/bin/loki
+                    chmod +x /usr/local/bin/loki
+                    rm -f /tmp/loki.zip
+                    ok "Loki binary installed → /usr/local/bin/loki"
+                else
+                    warn "Loki binary not found in archive — install manually from https://github.com/grafana/loki/releases"
+                fi
             else
                 warn "Loki binary not found in archive — install manually from https://github.com/grafana/loki/releases"
             fi
         else
+            rm -f /tmp/loki.zip
             warn "Loki download failed — install manually from https://github.com/grafana/loki/releases"
         fi
     else
@@ -1361,20 +1387,33 @@ LOKISVC
     local promtail_ver="3.0.0"
     info "Installing Promtail v${promtail_ver} (log collection agent)..."
     if ! command -v promtail &>/dev/null; then
-        wget -q \
-            "https://github.com/grafana/loki/releases/download/v${promtail_ver}/promtail-linux-${arch}.zip" \
-            -O /tmp/promtail.zip 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-        if [[ -f /tmp/promtail.zip ]]; then
-            cd /tmp && unzip -q promtail.zip "promtail-linux-${arch}" 2>/dev/null || true
-            if [[ -f "/tmp/promtail-linux-${arch}" ]]; then
-                mv "/tmp/promtail-linux-${arch}" /usr/local/bin/promtail
-                chmod +x /usr/local/bin/promtail
-                rm -f /tmp/promtail.zip
-                ok "Promtail binary installed → /usr/local/bin/promtail"
+        local promtail_url="https://github.com/grafana/loki/releases/download/v${promtail_ver}/promtail-linux-${arch}.zip"
+        rm -f /tmp/promtail.zip
+        # Try curl first (handles redirects better), fall back to wget
+        if command -v curl &>/dev/null; then
+            curl -fsSL "$promtail_url" -o /tmp/promtail.zip 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        else
+            wget -q "$promtail_url" -O /tmp/promtail.zip 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        fi
+        if [[ -f /tmp/promtail.zip ]] && unzip -t /tmp/promtail.zip &>/dev/null; then
+            # Discover the binary name inside the archive (handles naming variations)
+            local promtail_bin
+            promtail_bin=$(unzip -Z1 /tmp/promtail.zip 2>/dev/null | grep -E '^promtail-linux' | head -1) || true
+            if [[ -n "$promtail_bin" ]]; then
+                cd /tmp && unzip -q promtail.zip "$promtail_bin" 2>/dev/null || true
+                if [[ -f "/tmp/$promtail_bin" ]]; then
+                    mv "/tmp/$promtail_bin" /usr/local/bin/promtail
+                    chmod +x /usr/local/bin/promtail
+                    rm -f /tmp/promtail.zip
+                    ok "Promtail binary installed → /usr/local/bin/promtail"
+                else
+                    warn "Promtail binary not found in archive — install manually from https://github.com/grafana/loki/releases"
+                fi
             else
                 warn "Promtail binary not found in archive — install manually from https://github.com/grafana/loki/releases"
             fi
         else
+            rm -f /tmp/promtail.zip
             warn "Promtail download failed — install manually from https://github.com/grafana/loki/releases"
         fi
     else
@@ -1473,6 +1512,10 @@ scrape_configs:
                 status:
 PTCFG
         # Allow promtail to read PM2 log directory (requires ACL support on the filesystem)
+        if ! command -v setfacl &>/dev/null; then
+            info "Installing 'acl' package to enable Promtail access to PM2 log dir..."
+            apt-get install -y acl 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        fi
         if command -v setfacl &>/dev/null; then
             setfacl -m "u:promtail:rx" "/home/${USERNAME}" 2>/dev/null \
                 || warn "setfacl failed for /home/${USERNAME} — Promtail may not read PM2 logs."
@@ -1484,7 +1527,7 @@ PTCFG
             setfacl -m "u:promtail:rx" -m "d:u:promtail:rx" "${pm2_log_dir}" 2>/dev/null \
                 || warn "setfacl default ACL failed for ${pm2_log_dir} — new log files may not be readable by Promtail."
         else
-            warn "setfacl not available — install 'acl' package so Promtail can access PM2 log dir."
+            warn "setfacl still not available after installing 'acl' — Promtail may not read PM2 logs."
         fi
         chown promtail:promtail /etc/promtail/promtail.yml
         ok "Promtail config written to /etc/promtail/promtail.yml."
@@ -1725,8 +1768,13 @@ setup_fail2ban() {
     section "11" "fail2ban — Brute Force Protection"
 
     if ! command -v fail2ban-server &>/dev/null; then
-        warn "fail2ban not installed: apt-get install -y fail2ban"
-        section_end; return
+        info "fail2ban not installed — installing now..."
+        apt-get install -y fail2ban 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        if ! command -v fail2ban-server &>/dev/null; then
+            warn "fail2ban installation failed — install manually: apt-get install -y fail2ban"
+            section_end; return
+        fi
+        ok "fail2ban installed."
     fi
 
     cat > "/etc/fail2ban/jail.d/node-provision.conf" <<F2B
@@ -1810,16 +1858,16 @@ LOGROTATE
 
 print_summary() {
     echo ""
-    echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${GRN}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
+    echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
+    printf  "  ${PRP}${BOLD}║${R}${GRN}${BOLD}%-76s${R}${PRP}${BOLD}║${R}\n" \
             "  ✔  Provisioning Complete"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+    printf  "  ${PRP}${BOLD}║${R}${GRY}%-76s${R}${PRP}${BOLD}║${R}\n" \
             "  Your Node.js production server is ready."
-    echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
+    echo -e "${PRP}${BOLD}  ╠${HR2}╣${R}"
 
-    _row() { printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${WHT}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" "$1" "$2"; }
-    _sep() { echo -e "  ${BLU}${BOLD}╠${HR2}╣${R}"; }
-    _hdr() { printf "  ${BLU}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" "$1"; }
+    _row() { printf "  ${PRP}${BOLD}║${R}  ${GRY}%-22s${R}  ${WHT}${BOLD}%-50s${R}  ${PRP}${BOLD}║${R}\n" "$1" "$2"; }
+    _sep() { echo -e "  ${PRP}${BOLD}╠${HR2}╣${R}"; }
+    _hdr() { printf "  ${PRP}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}  ${PRP}${BOLD}║${R}\n" "$1"; }
 
     _hdr "Server Details"
     _sep
@@ -1832,9 +1880,9 @@ print_summary() {
     _row "Monitoring"     "server_status  ·  pm2 monit  ·  Grafana :3001  ·  Loki :3100"
 
     _sep
-    printf "  ${BLU}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
+    printf "  ${PRP}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
         "⚠  Password" "$PASSWORD"
-    printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${GRY}%-50s${R}  ${BLU}${BOLD}║${R}\n" \
+    printf "  ${PRP}${BOLD}║${R}  ${GRY}%-22s${R}  ${GRY}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
         "" "Save this now — it will NOT be shown again."
 
     _sep
@@ -1850,7 +1898,7 @@ print_summary() {
     )
     local i=1
     for s in "${node_steps[@]}"; do
-        printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%s.${R}  ${WHT}%-68s${R}  ${BLU}${BOLD}║${R}\n" "$i" "$s"
+        printf "  ${PRP}${BOLD}║${R}  ${GRN}${BOLD}%s.${R}  ${WHT}%-68s${R}  ${PRP}${BOLD}║${R}\n" "$i" "$s"
         (( i++ ))
     done
 
@@ -1869,7 +1917,7 @@ print_summary() {
         "  Logs:       Explore → select Loki → query {job='pm2'} or {job='syslog'}"
     )
     for s in "${mon_steps[@]}"; do
-        printf "  ${BLU}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}\n" "$s"
+        printf "  ${PRP}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
     done
 
     _sep
@@ -1881,13 +1929,13 @@ print_summary() {
         "Each app has its own port, logs, and restart policy"
     )
     for s in "${multi_steps[@]}"; do
-        printf "  ${BLU}${BOLD}║${R}  ${GRN}·${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}\n" "$s"
+        printf "  ${PRP}${BOLD}║${R}  ${GRN}·${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
     done
 
     _sep
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+    printf  "  ${PRP}${BOLD}║${R}${GRY}%-76s${R}${PRP}${BOLD}║${R}\n" \
             "  Log file: ${LOG_FILE}"
-    echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
+    echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 }
 
