@@ -323,18 +323,21 @@ install_acmesh() {
   # Download the actual acme.sh script directly (not the get.acme.sh wrapper).
   # Using the wrapper via "sh get.acme.sh --home DIR" causes "Unknown parameter: ----home"
   # because the wrapper appends "-- $@" when calling the installer, doubling the dashes.
-  local _acme_installer; _acme_installer="$(mktemp)"
+  # acme.sh's --install routine does `cp acme.sh` (relative path) to copy itself,
+  # so the downloaded file MUST be named "acme.sh" inside a dedicated temp directory.
+  local _tmp_dir; _tmp_dir="$(mktemp -d)"
+  local _acme_installer="${_tmp_dir}/acme.sh"
   local _acme_url="https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
   if command -v curl &>/dev/null; then
     curl -fsSL "$_acme_url" -o "$_acme_installer" 2>&1 \
-      || { rm -f "$_acme_installer"; die "Failed to download acme.sh installer. Check internet connectivity."; }
+      || { rm -rf "$_tmp_dir"; die "Failed to download acme.sh installer. Check internet connectivity."; }
   else
     wget -qO "$_acme_installer" "$_acme_url" 2>&1 \
-      || { rm -f "$_acme_installer"; die "Failed to download acme.sh installer. Check internet connectivity."; }
+      || { rm -rf "$_tmp_dir"; die "Failed to download acme.sh installer. Check internet connectivity."; }
   fi
-  sh "$_acme_installer" --install --home "$ACMESH_DIR" \
-    --accountemail "${ACME_EMAIL:-admin@example.com}" --no-cron 2>&1 | tail -5
-  rm -f "$_acme_installer"
+  (cd "$_tmp_dir" && sh acme.sh --install --home "$ACMESH_DIR" \
+    --accountemail "${ACME_EMAIL:-admin@example.com}" --no-cron 2>&1 | tail -5)
+  rm -rf "$_tmp_dir"
 
   # Re-source so the alias is available in this session
   # shellcheck source=/dev/null
@@ -546,8 +549,8 @@ collect_ssl() {
     2) SSL_MODE="acmesh"; ACME_CA="zerossl" ;;
     3) SSL_MODE="acmesh"; ACME_CA="buypass" ;;
     4) SSL_MODE="acmesh"; ACME_CA="multi" ;;
-    5) SSL_MODE="selfsigned" ;;
-    6) SSL_MODE="manual"
+    5) SSL_MODE="selfsigned"; ACME_CA="" ;;
+    6) SSL_MODE="manual"; ACME_CA=""
        SSL_CERT_PATH=$(ask_input "Certificate file path (.crt/.pem)" "/etc/ssl/${DOMAIN}/fullchain.pem")
        SSL_KEY_PATH=$(ask_input  "Private key file path (.key)"      "/etc/ssl/${DOMAIN}/privkey.pem") ;;
     *) SSL_MODE="acmesh"; ACME_CA="multi" ;;
@@ -1092,22 +1095,23 @@ issue_acmesh_cert() {
 
   info "Trying ${ca_name}..."
 
-  # Issue certificate
+  # Issue certificate — capture exit code safely without triggering set -e
+  local _issue_rc=0
   "$ACMESH_BIN" --issue \
     --server "$ca_server" \
     --webroot "/var/www/letsencrypt" \
     $domains \
     --keylength ec-256 \
-    --force 2>&1 | tail -8
+    --force 2>&1 | tail -8 || _issue_rc=$?
 
-  if [[ "${PIPESTATUS[0]}" -eq 0 ]] || "$ACMESH_BIN" --list 2>/dev/null | grep -q "^${DOMAIN}"; then
+  if [[ "$_issue_rc" -eq 0 ]] || "$ACMESH_BIN" --list 2>/dev/null | grep -q "^${DOMAIN}"; then
     # Install/copy certs to a stable path that nginx references
     "$ACMESH_BIN" --install-cert \
       -d "${DOMAIN}" \
       --cert-file      "${cert_dir}/cert.pem" \
       --key-file       "${cert_dir}/privkey.pem" \
       --fullchain-file "${cert_dir}/fullchain.pem" \
-      --reloadcmd      "systemctl reload nginx" 2>&1 | tail -3
+      --reloadcmd      "systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null || true" 2>&1 | tail -3
     success "${ca_name} certificate issued and installed."
     success "Auto-renewal: every 30 days, nginx reloads automatically."
     return 0
@@ -1131,6 +1135,47 @@ handle_ssl_setup() {
 
       local cert_dir="/etc/ssl/acmesh/${DOMAIN}"
       mkdir -p "$cert_dir"
+
+      # ── Pre-load nginx so it serves port 80 for the HTTP-01 ACME challenge ──
+      # The generated nginx config references SSL cert files that don't exist yet.
+      # Create temporary dummy self-signed certs so nginx can pass the config test
+      # and reload before the real cert is issued.
+      if [[ ! -f "${cert_dir}/fullchain.pem" || ! -f "${cert_dir}/privkey.pem" ]]; then
+        info "Creating temporary self-signed certificate for initial nginx load..."
+        openssl req -x509 -nodes -days 1 \
+          -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+          -keyout "${cert_dir}/privkey.pem" \
+          -out    "${cert_dir}/fullchain.pem" \
+          -subj   "/CN=${DOMAIN}" 2>/dev/null
+        cp "${cert_dir}/fullchain.pem" "${cert_dir}/cert.pem"
+        chmod 600 "${cert_dir}/privkey.pem"
+      fi
+
+      # When HTTP_TO_HTTPS=false the generated config has no port-80 block, so
+      # the ACME webroot challenge won't be reachable.  Add a minimal vhost for it.
+      local _acme_tmp_conf=""
+      if [[ "$HTTP_TO_HTTPS" != "true" ]]; then
+        _acme_tmp_conf="/etc/nginx/sites-enabled/_acme_challenge_${DOMAIN//./_}.conf"
+        local _sv="${DOMAIN}"; [[ "$ENABLE_WWW" == "true" ]] && _sv+=" www.${DOMAIN}"
+        cat > "$_acme_tmp_conf" <<TMPVH
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${_sv};
+    root /var/www/letsencrypt;
+    location /.well-known/acme-challenge/ { try_files \$uri =404; }
+    location / { return 404; }
+}
+TMPVH
+      fi
+
+      # Reload nginx so the ACME challenge path is served on port 80
+      if nginx -t 2>/dev/null; then
+        systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null || true
+        info "Nginx reloaded — port 80 now serves ACME challenge."
+      else
+        warn "Nginx config test failed before cert issuance — HTTP-01 challenge may fail."
+      fi
 
       case "$ACME_CA" in
         letsencrypt)
@@ -1157,6 +1202,9 @@ handle_ssl_setup() {
           fi
           ;;
       esac
+
+      # Remove temporary HTTP-only challenge vhost now that cert is issued
+      [[ -n "${_acme_tmp_conf:-}" ]] && rm -f "$_acme_tmp_conf"
 
       # Add a daily cron for acme.sh renewal checks
       if ! crontab -l 2>/dev/null | grep -q "acme.sh --cron"; then
