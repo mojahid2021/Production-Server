@@ -319,18 +319,20 @@ install_acmesh() {
     esac
   fi
 
-  # Install acme.sh without running as a service — we manage the cron ourselves
-  # Download to a temp file first; piping directly into "sh -s -- --option" passes
-  # the "--" as $1 to the installer, which causes "Unknown parameter: ----home".
+  # Install acme.sh without running as a service — we manage the cron ourselves.
+  # Download the actual acme.sh script directly (not the get.acme.sh wrapper).
+  # Using the wrapper via "sh get.acme.sh --home DIR" causes "Unknown parameter: ----home"
+  # because the wrapper appends "-- $@" when calling the installer, doubling the dashes.
   local _acme_installer; _acme_installer="$(mktemp)"
+  local _acme_url="https://raw.githubusercontent.com/acmesh-official/acme.sh/master/acme.sh"
   if command -v curl &>/dev/null; then
-    curl -fsSL https://get.acme.sh -o "$_acme_installer" 2>&1 \
+    curl -fsSL "$_acme_url" -o "$_acme_installer" 2>&1 \
       || { rm -f "$_acme_installer"; die "Failed to download acme.sh installer. Check internet connectivity."; }
   else
-    wget -qO "$_acme_installer" https://get.acme.sh 2>&1 \
+    wget -qO "$_acme_installer" "$_acme_url" 2>&1 \
       || { rm -f "$_acme_installer"; die "Failed to download acme.sh installer. Check internet connectivity."; }
   fi
-  sh "$_acme_installer" --home "$ACMESH_DIR" \
+  sh "$_acme_installer" --install --home "$ACMESH_DIR" \
     --accountemail "${ACME_EMAIL:-admin@example.com}" --no-cron 2>&1 | tail -5
   rm -f "$_acme_installer"
 
