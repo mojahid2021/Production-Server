@@ -64,7 +64,11 @@ ensure_dir() {
 }
 
 # ─── Root check ───────────────────────────────────────────────────────────────
-check_root() { [[ "$EUID" -ne 0 ]] && die "Run as root: sudo ./nginx-setup.sh"; }
+check_root() {
+  if [[ "$EUID" -ne 0 ]]; then
+    die "Run as root: sudo ./nginx-setup.sh"
+  fi
+}
 
 # ─── Detect OS ────────────────────────────────────────────────────────────────
 detect_os() {
@@ -366,7 +370,7 @@ collect_domain() {
     2) ENABLE_WWW=false ;;
     *) ENABLE_WWW=true  ;;
   esac
-  [[ "$ENABLE_WWW" == "true" ]] && info "SAN cert will cover both ${DOMAIN} and www.${DOMAIN}."
+  [[ "$ENABLE_WWW" == "true" ]] && info "SAN cert will cover both ${DOMAIN} and www.${DOMAIN}." || true
 }
 
 # ─── STEP 2 — Site type & backend ─────────────────────────────────────────────
@@ -453,7 +457,7 @@ collect_ssl() {
   FEAT_SSL=false; SSL_MODE=""; HTTP_TO_HTTPS=false; HSTS=false
   SSL_CERT_PATH=""; SSL_KEY_PATH=""; ACME_CA="letsencrypt"
 
-  ask_yes_no "Enable SSL/HTTPS?" "y" || return
+  ask_yes_no "Enable SSL/HTTPS?" "y" || return 0
   FEAT_SSL=true
 
   echo ""
@@ -494,8 +498,8 @@ collect_ssl() {
 collect_performance() {
   section "Performance"
   FEAT_GZIP=false; FEAT_CACHE=false
-  ask_yes_no "Enable Gzip compression?" "y"                       && FEAT_GZIP=true
-  ask_yes_no "Cache static assets (images, CSS, JS, fonts)?" "y" && FEAT_CACHE=true
+  ask_yes_no "Enable Gzip compression?" "y"                       && FEAT_GZIP=true  || true
+  ask_yes_no "Cache static assets (images, CSS, JS, fonts)?" "y" && FEAT_CACHE=true || true
 }
 
 # ─── STEP 5 — Rate & connection limits ────────────────────────────────────────
@@ -529,7 +533,7 @@ collect_misc() {
     FEAT_AUTH=true
     AUTH_USER=$(ask_input "Username" "admin")
   fi
-  ask_yes_no "Configure custom error pages (400, 403, 404, 429, 50x)?" "y" && FEAT_ERROR_PAGES=true
+  ask_yes_no "Configure custom error pages (400, 403, 404, 429, 50x)?" "y" && FEAT_ERROR_PAGES=true || true
 }
 
 # ─── STEP 7 — File upload ─────────────────────────────────────────────────────
@@ -539,7 +543,7 @@ collect_upload() {
   UPLOAD_ALLOWED_TYPES="jpg|jpeg|png|gif|webp|pdf|doc|docx|xls|xlsx|zip|tar|gz"
   UPLOAD_TIMEOUT="60"; UPLOAD_DISABLE_EXEC=false
 
-  ask_yes_no "Configure file upload permissions?" "n" || return
+  ask_yes_no "Configure file upload permissions?" "n" || return 0
   FEAT_UPLOAD=true
   UPLOAD_MAX_SIZE=$(ask_input "Max upload size (e.g. 10M, 50M, 100M)" "10M")
   UPLOAD_TIMEOUT=$(ask_input  "Upload timeout in seconds"              "60")
@@ -567,7 +571,7 @@ collect_security() {
   FEAT_BLOCK_BOTS=false; FEAT_BLOCK_ATTACKS=false; FEAT_BLOCK_XMLRPC=false
   FEAT_BUFFER_LIMITS=false; FEAT_IP_RESTRICT=false; RESTRICTED_PATH=""; ALLOWED_IPS=""
 
-  ask_yes_no "Enable security hardening?" "y" || return
+  ask_yes_no "Enable security hardening?" "y" || return 0
 
   info "Configure each rule:"
   echo ""
@@ -1135,9 +1139,9 @@ CNF
 
     # ── Manual ────────────────────────────────────────────────────────────────
     manual)
-      [[ ! -f "$SSL_CERT_PATH" ]] && warn "Cert not found: ${SSL_CERT_PATH}"
-      [[ ! -f "$SSL_KEY_PATH"  ]] && warn "Key not found:  ${SSL_KEY_PATH}"
-      [[ "$ENABLE_WWW" == "true" ]] && warn "Ensure cert has SAN for www.${DOMAIN}"
+      [[ ! -f "$SSL_CERT_PATH" ]] && warn "Cert not found: ${SSL_CERT_PATH}" || true
+      [[ ! -f "$SSL_KEY_PATH"  ]] && warn "Key not found:  ${SSL_KEY_PATH}"  || true
+      [[ "$ENABLE_WWW" == "true" ]] && warn "Ensure cert has SAN for www.${DOMAIN}" || true
       ;;
   esac
 }
