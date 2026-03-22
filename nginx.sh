@@ -1,35 +1,94 @@
 #!/usr/bin/env bash
-# =============================================================================
-#  nginx-setup.sh — Interactive Nginx Domain Setup Script  v4
-#  Usage  : chmod +x nginx-setup.sh && sudo ./nginx-setup.sh
-#  SSL    : acme.sh (pure shell, zero dependencies, multi-CA fallback)
-#           CA priority: Let's Encrypt → ZeroSSL → BuyPass Go SSL
-#           Auto-renews every 30 days, reloads nginx automatically.
-#           Never touches or rewrites your nginx config on renewal.
-#  Supports: Static · Node.js · Laravel · Django · PHP · Any app
-# =============================================================================
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║  nginx.sh  —  Interactive Nginx Domain Setup  v4.0.0                         ║
+# ║  Ubuntu 20.04 / 22.04 / 24.04 LTS                                           ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║                                                                              ║
+# ║  WHAT THIS DOES                                                              ║
+# ║  01. Preflight  — root check, OS detection, dependency check                 ║
+# ║  02. Domain     — configure domain, www handling, conflict resolution        ║
+# ║  03. Site Type  — Static files, Reverse Proxy, PHP-FPM                       ║
+# ║  04. SSL        — acme.sh (Let's Encrypt / ZeroSSL / BuyPass), self-signed   ║
+# ║  05. Performance — Gzip, static-asset caching                                ║
+# ║  06. Rate Limits — per-IP request rate & connection limiting                 ║
+# ║  07. Logging & Auth — custom log paths, HTTP basic authentication            ║
+# ║  08. File Upload — size limits, allowed types, upload directory              ║
+# ║  09. Security   — headers, bot blocking, method limiting, IP restriction     ║
+# ║  10. Generate & apply Nginx config                                           ║
+# ║  11. SSL provisioning (acme.sh multi-CA with auto-renewal cron)              ║
+# ║  12. Test & reload Nginx                                                     ║
+# ║                                                                              ║
+# ╠══════════════════════════════════════════════════════════════════════════════╣
+# ║                                                                              ║
+# ║  USAGE                                                                       ║
+# ║    sudo ./nginx.sh                    (interactive — recommended)            ║
+# ║                                                                              ║
+# ║  SSL PROVIDERS                                                               ║
+# ║    acme.sh  Let's Encrypt → ZeroSSL → BuyPass Go SSL  (multi-CA fallback)   ║
+# ║    Auto-renews every 30 days · nginx reloaded silently · config never touched║
+# ║                                                                              ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail
 
-# ─── Colours ──────────────────────────────────────────────────────────────────
-RED='\033[0;31m';  GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-BLUE='\033[0;34m'; CYAN='\033[0;36m';  BOLD='\033[1m'; RESET='\033[0m'
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  CONFIG
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
-info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
-success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
-warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
-error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
-die()     { error "$*"; exit 1; }
+readonly SCRIPT_VERSION="4.0.0"
+readonly LOG_FILE="/var/log/nginx_provision.log"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  COLORS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+if [[ -t 1 ]] && tput colors &>/dev/null && (( $(tput colors) >= 8 )); then
+    R=$'\033[0m'  BOLD=$'\033[1m'  DIM=$'\033[2m'
+    GRN=$'\033[38;5;82m'   BLU=$'\033[38;5;33m'   CYN=$'\033[38;5;45m'
+    YLW=$'\033[38;5;220m'  PRP=$'\033[38;5;135m'
+    WHT=$'\033[38;5;255m'  GRY=$'\033[38;5;244m'  RED=$'\033[38;5;196m'
+    TICK="${GRN}✔${R}"  CROSS="${RED}✘${R}"  WARN_IC="${YLW}⚠${R}"
+    ARROW="${CYN}›${R}"  BULLET="${PRP}◆${R}"
+else
+    R='' BOLD='' DIM='' GRN='' BLU='' CYN='' YLW='' PRP='' WHT='' GRY='' RED=''
+    TICK='[OK]' CROSS='[ERR]' WARN_IC='[WARN]' ARROW='->' BULLET='*'
+fi
+
+# Aliases — preserve compatibility with existing code in this script
+GREEN="$GRN"; RESET="$R"; CYAN="$CYN"; YELLOW="$YLW"; BLUE="$BLU"
+
+readonly HR2="════════════════════════════════════════════════════════════════════════════"
+readonly HR="────────────────────────────────────────────────────────────────────────────"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OUTPUT
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_log()    { printf '[%s] [%-5s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" "$2" >> "$LOG_FILE" 2>/dev/null || true; }
+info()    { echo -e "  ${ARROW}  ${GRY}$*${R}";              _log INFO  "$*"; }
+success() { echo -e "  ${TICK}  $*";                         _log INFO  "$*"; }
+warn()    { echo -e "  ${WARN_IC}  ${YLW}$*${R}";            _log WARN  "$*"; }
+error()   { echo -e "  ${CROSS}  ${RED}$*${R}" >&2;          _log ERROR "$*"; }
+die()     { echo -e "\n  ${CROSS}  ${RED}${BOLD}FATAL: $*${R}\n" >&2; _log ERROR "$*"; exit 1; }
 
 banner() {
-  echo -e "${BOLD}${BLUE}"
-  echo "╔══════════════════════════════════════════════════════════════╗"
-  echo "║          🚀  Nginx Domain Setup Script  v4  🚀               ║"
-  echo "║          Static · Node.js · Laravel · PHP · Any App          ║"
-  echo "║          acme.sh SSL · Multi-CA · Zero Interruption          ║"
-  echo "╚══════════════════════════════════════════════════════════════╝"
-  echo -e "${RESET}"
+    clear
+    echo ""
+    echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
+    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  🚀  nginx.sh  —  Nginx Domain Setup Script  v${SCRIPT_VERSION}"
+    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  Ubuntu 20.04 / 22.04 / 24.04 LTS  ·  Static · Node.js · Laravel · PHP"
+    echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
+    printf  "  ${BLU}${BOLD}║${R}${GRN}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  acme.sh SSL  ·  Let's Encrypt → ZeroSSL → BuyPass Go SSL  (Multi-CA)"
+    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  Auto-renews every 30 days · nginx reloaded silently · config never touched"
+    echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
+    printf  "  ${BLU}${BOLD}║${R}${DIM}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  github.com/mojahid2021/Production-Server"
+    echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
+    echo ""
 }
 
 ask_yes_no() {
@@ -49,9 +108,10 @@ ask_input() {
   echo "${val:-$default}"
 }
 
-section()  { echo ""; echo -e "${BOLD}${BLUE}━━━  $*  ━━━${RESET}"; }
-divider()  { echo -e "${BLUE}──────────────────────────────────────────────────────────────${RESET}"; }
-sub_info() { echo -e "  ${CYAN}${*}${RESET}"; }
+section()     { echo ""; echo -e "  ${BLU}${BOLD}┌─ $*${R}"; echo -e "  ${BLU}${DIM}│${R}"; }
+section_end() { echo -e "  ${BLU}${DIM}└${HR:0:60}${R}"; echo ""; }
+divider()     { echo -e "  ${BLU}${DIM}${HR:0:60}${R}"; }
+sub_info()    { echo -e "    ${GRY}${*}${R}"; }
 
 ensure_dir() {
   local dir="$1"
@@ -261,10 +321,10 @@ install_acmesh() {
 
   # Install acme.sh without running as a service — we manage the cron ourselves
   if command -v curl &>/dev/null; then
-    curl -fsSL https://get.acme.sh | sh -s -- --install-online --home "$ACMESH_DIR" \
+    curl -fsSL https://get.acme.sh | sh -s -- --home "$ACMESH_DIR" \
       --accountemail "${ACME_EMAIL:-admin@example.com}" --no-cron 2>&1 | tail -5
   else
-    wget -qO- https://get.acme.sh | sh -s -- --install-online --home "$ACMESH_DIR" \
+    wget -qO- https://get.acme.sh | sh -s -- --home "$ACMESH_DIR" \
       --accountemail "${ACME_EMAIL:-admin@example.com}" --no-cron 2>&1 | tail -5
   fi
 
