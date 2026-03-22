@@ -320,13 +320,19 @@ install_acmesh() {
   fi
 
   # Install acme.sh without running as a service — we manage the cron ourselves
+  # Download to a temp file first; piping directly into "sh -s -- --option" passes
+  # the "--" as $1 to the installer, which causes "Unknown parameter: ----home".
+  local _acme_installer; _acme_installer="$(mktemp)"
   if command -v curl &>/dev/null; then
-    curl -fsSL https://get.acme.sh | sh -s -- --home "$ACMESH_DIR" \
-      --accountemail "${ACME_EMAIL:-admin@example.com}" --no-cron 2>&1 | tail -5
+    curl -fsSL https://get.acme.sh -o "$_acme_installer" 2>&1 \
+      || { rm -f "$_acme_installer"; die "Failed to download acme.sh installer. Check internet connectivity."; }
   else
-    wget -qO- https://get.acme.sh | sh -s -- --home "$ACMESH_DIR" \
-      --accountemail "${ACME_EMAIL:-admin@example.com}" --no-cron 2>&1 | tail -5
+    wget -qO "$_acme_installer" https://get.acme.sh 2>&1 \
+      || { rm -f "$_acme_installer"; die "Failed to download acme.sh installer. Check internet connectivity."; }
   fi
+  sh "$_acme_installer" --home "$ACMESH_DIR" \
+    --accountemail "${ACME_EMAIL:-admin@example.com}" --no-cron 2>&1 | tail -5
+  rm -f "$_acme_installer"
 
   # Re-source so the alias is available in this session
   # shellcheck source=/dev/null
