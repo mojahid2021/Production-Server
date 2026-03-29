@@ -2232,6 +2232,11 @@ LOKISVC
 
     # Set up ACL permissions for Promtail BEFORE creating config
     info "Setting up Promtail permissions for log access..."
+    
+    # Declare variables before use
+    local pm2_log_dir="/home/${USERNAME}/.pm2/logs"
+    local hostname_val="$(hostname 2>/dev/null || echo 'server')"
+    
     if ! command -v setfacl &>/dev/null; then
         apt-get install -y acl 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
     fi
@@ -2244,9 +2249,6 @@ LOKISVC
     else
         warn "setfacl not available — Promtail may have limited log access"
     fi
-
-    local pm2_log_dir="/home/${USERNAME}/.pm2/logs"
-    local hostname_val="$(hostname 2>/dev/null || echo 'server')"
     if [[ ! -f /etc/promtail/promtail.yml ]]; then
         cat > /etc/promtail/promtail.yml <<PTCFG
 server:
