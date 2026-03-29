@@ -14,7 +14,8 @@
 # ║  07. NVM + Node.js installation                                              ║
 # ║  08. PM2 — process manager + bulletproof systemd startup                    ║
 # ║  09. Monitoring — Prometheus + Grafana + node_exporter + PM2 exporter       ║
-# ║      + Loki (log backend) + Promtail (log agent) + status script            ║
+# ║      + Loki (log backend) + Promtail (log agent)                             ║
+# ║      + ClickHouse (2-day analytics) + status script                          ║
 # ║  10. Kernel hardening (sysctl)                                               ║
 # ║  11. fail2ban — brute force SSH protection                                   ║
 # ║  12. UFW firewall                                                            ║
@@ -375,7 +376,7 @@ prompt_inputs() {
     _conf_row "PM2"         "$(  $INSTALL_PM2 && echo "✔ install" || echo "– skip (--no-pm2)")"
     _conf_row "UFW"         "$(  $GEN_FW      && echo "✔ configure" || echo "– skip (--no-fw)")"
     _conf_row "Firewall"    "SSH + $( [[ "$OPEN_NGINX_PORTS" == true ]] && echo "Nginx " ; [[ "$OPEN_EMAIL_PORTS" == true ]] && echo "Email " ; [[ -n "$CUSTOM_PORTS" ]] && echo "Custom " ; echo "")"
-    _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Grafana · Prometheus · Loki · Promtail · PM2 exporter" || echo "– skip (--no-mon)")"
+    _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Prometheus · Grafana · Loki · ClickHouse · PM2" || echo "– skip (--no-mon)")"
     echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
@@ -602,12 +603,173 @@ export NVM_DIR="$HOME/.nvm"
 # PM2
 [[ -f "$HOME/.pm2/autocomplete.sh" ]] && source "$HOME/.pm2/autocomplete.sh"
 
-# ── PM2 shortcuts ───────────────────────────────────────────────────
-alias logs='pm2 logs'
+# Make pm2-start-logs available globally
+[[ -f "$HOME/.pm2/pm2-start-logs.sh" ]] && export PATH="$HOME/.pm2:$PATH"
+
+# ── PM2 logging functions ────────────────────────────────────────
+# Detailed log viewing with timestamps and filtering
+pm2_logs_live() {
+    pm2 logs 2>/dev/null || echo "PM2 not running or no apps started"
+}
+
+pm2_logs_app() {
+    local app="${1:-}"
+    if [[ -z "$app" ]]; then
+        echo "Usage: pm2_logs_app <app-name>"
+        echo "Available apps:"
+        pm2 list | grep "│" | grep -v "id│name" || echo "  (no apps running)"
+        return
+    fi
+    pm2 logs "$app" --lines 100
+}
+
+pm2_logs_errors() {
+    local app="${1:-}"
+    if [[ -z "$app" ]]; then
+        echo "Recent errors from all apps:"
+        grep -r "ERROR\|Error\|error" ~/.pm2/logs/*.log 2>/dev/null | tail -50 || echo "  (no errors found)"
+    else
+        echo "Recent errors from $app:"
+        grep "ERROR\|Error\|error" ~/.pm2/logs/"${app}"*.log 2>/dev/null | tail -50 || echo "  (no errors found)"
+    fi
+}
+
+pm2_log_size() {
+    echo "PM2 Log File Sizes:"
+    du -sh ~/.pm2/logs/* 2>/dev/null | sort -h || echo "  (no logs found)"
+    echo ""
+    echo "Total PM2 logs directory:"
+    du -sh ~/.pm2/logs/ 2>/dev/null || echo "  (empty)"
+}
+
+pm2_clear_logs() {
+    local app="${1:-all}"
+    if [[ "$app" == "all" ]]; then
+        rm -f ~/.pm2/logs/*.log ~/.pm2/logs/*.gz
+        echo "✓ All PM2 logs cleared"
+        pm2 flush
+    else
+        rm -f ~/.pm2/logs/"${app}"*.log ~/.pm2/logs/"${app}"*.gz
+        echo "✓ Logs cleared for: $app"
+    fi
+}
+
+# ── PM2 AUTO-LOGGING wrapper ─────────────────────────────────────
+# Start app with automatic detailed logging
+pm2_start_auto() {
+    if [[ $# -eq 0 ]]; then
+        echo "🚀 PM2 Auto-Logging Starter"
+        echo ""
+        echo "Usage: pm2_start_auto <app.js> [options]"
+        echo ""
+        echo "Examples:"
+        echo "  pm2_start_auto app.js                          # Auto: app-out/error.log"
+        echo "  pm2_start_auto app.js --name myapp             # Auto: myapp-out/error.log"
+        echo "  pm2_start_auto app.js --name api -- --port 3000"
+        echo ""
+        echo "Logs saved to: ~/.pm2/logs/<app-name>-{out,error}.log"
+        echo "View logs:"
+        echo "  plog_app <app-name>"
+        echo "  plog_errors <app-name>"
+        return
+    fi
+    
+    local script="$1"
+    shift
+    
+    # Extract app name from args or script
+    local app_name
+    for i in "$@"; do
+        if [[ "$prev" == "--name" ]]; then
+            app_name="$i"
+            break
+        fi
+        prev="$i"
+    done
+    
+    app_name="${app_name:-$(basename "$script" | sed 's/\.[^.]*$//')}"
+    local logs_dir="$HOME/.pm2/logs"
+    mkdir -p "$logs_dir"
+    
+    # Start with automatic logging
+    pm2 start "$script" \
+        --name "$app_name" \
+        --output "$logs_dir/${app_name}-out.log" \
+        --error "$logs_dir/${app_name}-error.log" \
+        --log-date-format 'YYYY-MM-DD HH:mm:ss Z' \
+        "$@" 2>&1
+    
+    echo ""
+    echo "✓ Started: $app_name"
+    echo "  Logs: ~/.pm2/logs/${app_name}-{out,error}.log"
+    echo ""
+}
+
+# ── ClickHouse log queries (centralized logging) ──────────────────
+# Query PM2 logs from ClickHouse instead of local files
+ch_logs_pm2() {
+    local app="${1:-}"
+    local limit="${2:-50}"
+    local query
+    
+    if [[ -z "$app" ]]; then
+        query="SELECT timestamp, app_name, log_level, message FROM pm2_logs.logs WHERE log_type='pm2' ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact"
+    else
+        query="SELECT timestamp, app_name, log_level, message FROM pm2_logs.logs WHERE log_type='pm2' AND app_name='$app' ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact"
+    fi
+    
+    clickhouse-client --query "$query" 2>/dev/null || echo "ClickHouse not responding"
+}
+
+# Query ClickHouse errors (all apps)
+ch_logs_errors() {
+    local app="${1:-}"
+    local limit="${2:-50}"
+    local query
+    
+    if [[ -z "$app" ]]; then
+        query="SELECT timestamp, app_name, log_level, message FROM pm2_logs.logs WHERE log_level='ERROR' ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact"
+    else
+        query="SELECT timestamp, app_name, log_level, message FROM pm2_logs.logs WHERE log_level='ERROR' AND app_name='$app' ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact"
+    fi
+    
+    clickhouse-client --query "$query" 2>/dev/null || echo "ClickHouse not responding"
+}
+
+# View system logs in ClickHouse
+ch_logs_system() {
+    local limit="${1:-50}"
+    clickhouse-client --query "SELECT timestamp, log_type, message FROM pm2_logs.system_logs ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact" 2>/dev/null || echo "ClickHouse not responding"
+}
+
+# View Nginx logs in ClickHouse
+ch_logs_nginx() {
+    local limit="${1:-50}"
+    clickhouse-client --query "SELECT timestamp, http_status, request_method, request_path, response_time_ms FROM pm2_logs.nginx_logs ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact" 2>/dev/null || echo "ClickHouse not responding"
+}
+
+# Get log count (storage analysis)
+ch_logs_stats() {
+    echo "ClickHouse Log Statistics:"
+    echo ""
+    clickhouse-client --query "SELECT 'PM2 logs' as source, COUNT() as count, ROUND(SUM(1)/1024/1024, 2) as size_mb FROM pm2_logs.pm2_logs UNION ALL SELECT 'System logs', COUNT(), ROUND(SUM(1)/1024/1024, 2) FROM pm2_logs.system_logs UNION ALL SELECT 'Nginx logs', COUNT(), ROUND(SUM(1)/1024/1024, 2) FROM pm2_logs.nginx_logs FORMAT PrettyCompact" 2>/dev/null || echo "ClickHouse not responding"
+}
+
+# ── ClickHouse shortcuts ──────────────────────────────────────────
+alias ch_pm2='ch_logs_pm2'                    # View PM2 logs
+alias ch_errors='ch_logs_errors'              # View errors
+alias ch_system='ch_logs_system'              # View system logs
+alias ch_nginx='ch_logs_nginx'                # View nginx logs
+alias ch_stats='ch_logs_stats'                # Log statistics
 alias pstatus='pm2 status'
 alias prestart='pm2 restart all'
 alias pmonit='pm2 monit'
 alias psave='pm2 save'
+alias plog_size='pm2_log_size'
+alias plog_errors='pm2_logs_errors'
+alias plog_app='pm2_logs_app'
+alias plog_clear='pm2_clear_logs'
+alias pstart='pm2_start_auto'
 
 
 # ── Git shortcuts ────────────────────────────────────────────────────
@@ -723,7 +885,7 @@ install_pm2() {
 #  Five layers:
 #    A. node_exporter  — system metrics collector (CPU, RAM, disk, network)
 #    B. Prometheus     — metrics database (15-day retention)
-#    C. Grafana        — beautiful real-time browser dashboard (port 3001)
+#    C. Grafana        — beautiful real-time browser dashboard (port 13001)
 #    D. PM2 monit      — built-in process monitor for Node.js apps
 #    E. server_status  — quick CLI overview of everything
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -936,16 +1098,50 @@ PROMSVC
         ok "Grafana already installed."
     fi
 
-    # Configure Grafana: bind to localhost only, port 3001
-    # (port 3001 avoids conflicts with Node.js apps commonly running on port 3000)
+    # Configure Grafana: bind to localhost only, port 13001
+    # (uncommon port to avoid conflicts with Node.js apps and other services)
     if [[ -f /etc/grafana/grafana.ini ]]; then
-        sed -i 's/^;*\s*http_port\s*=.*/http_port = 3001/'      /etc/grafana/grafana.ini 2>/dev/null || true
+        sed -i 's/^;*\s*http_port\s*=.*/http_port = 13001/'     /etc/grafana/grafana.ini 2>/dev/null || true
         sed -i 's/^;*\s*http_addr\s*=.*/http_addr = 127.0.0.1/' /etc/grafana/grafana.ini 2>/dev/null || true
-        ok "Grafana: configured to listen on 127.0.0.1:3001."
+        ok "Grafana: configured to listen on 127.0.0.1:13001."
     fi
 
     # Provision Prometheus as the default Grafana data source
     mkdir -p /etc/grafana/provisioning/datasources /etc/grafana/provisioning/dashboards
+    
+    # Create dashboard providers for organized folders
+    cat > /etc/grafana/provisioning/dashboards/system.yaml <<SYSPROV
+apiVersion: 1
+providers:
+  - name: 'System Dashboards'
+    orgId: 1
+    folder: 'System'
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards/system
+SYSPROV
+    chown grafana:grafana /etc/grafana/provisioning/dashboards/system.yaml 2>/dev/null || true
+    
+    cat > /etc/grafana/provisioning/dashboards/applications.yaml <<APPPROV
+apiVersion: 1
+providers:
+  - name: 'Application Dashboards'
+    orgId: 1
+    folder: 'Applications'
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards/applications
+APPPROV
+    chown grafana:grafana /etc/grafana/provisioning/dashboards/applications.yaml 2>/dev/null || true
+    
+    # Create dashboard directories
+    mkdir -p /var/lib/grafana/dashboards/system /var/lib/grafana/dashboards/applications 2>/dev/null || true
+    
+    ok "Grafana dashboard folders created (System, Applications, Logs)."
     if [[ ! -f /etc/grafana/provisioning/datasources/prometheus.yaml ]]; then
         cat > /etc/grafana/provisioning/datasources/prometheus.yaml <<'GFDS'
 apiVersion: 1
@@ -1028,14 +1224,14 @@ providers:
     disableDeletion: false
     editable: true
     options:
-      path: ${dash_dir}
+      path: /var/lib/grafana/dashboards/system
 GFDB
         chown grafana:grafana /etc/grafana/provisioning/dashboards/node_exporter.yaml 2>/dev/null || true
-        ok "Grafana dashboard provider provisioned."
+        ok "Grafana System dashboard provider provisioned."
     fi
 
-    # Provision PM2 Process Monitor dashboard — always write so metric name fixes are applied
-    cat > "${dash_dir}/pm2_apps.json" <<PM2DASH
+    # Provision PM2 Process Monitor dashboard (Applications folder)
+    cat > /var/lib/grafana/dashboards/applications/01-pm2-process-monitor.json <<'PM2DASH'
 {
   "annotations": { "list": [] },
   "editable": true,
@@ -1185,16 +1381,198 @@ GFDB
   "time": { "from": "now-1h", "to": "now" },
   "timepicker": {},
   "timezone": "browser",
-  "title": "PM2 Process Monitor",
+  "title": "⚙️ PM2 — Process Monitor",
+  "description": "Real-time PM2 app monitoring: status, CPU, memory, uptime, restart counts",
   "uid": "pm2-process-monitor",
-  "version": 2
+  "version": 2,
+  "style": "dark"
 }
 PM2DASH
-    chown -R grafana:grafana "$dash_dir" 2>/dev/null || true
-    ok "Grafana: PM2 Process Monitor dashboard provisioned."
+    chmod 644 /var/lib/grafana/dashboards/applications/01-pm2-process-monitor.json
+    ok "✓ PM2 Process Monitor — Real-time PM2 app monitoring (status, CPU, memory, uptime, restart counts)"
 
-    # Provision Loki Log Explorer dashboard — always write so it stays current
-    cat > "${dash_dir}/loki_logs.json" <<LOGDASH
+    # ─── Applications Folder: Dashboard 2 ─────────────────────────────────────
+    # Provision application logs dashboard (Applications folder)
+    cat > /var/lib/grafana/dashboards/applications/02-app-logs.json <<'APPLOGS'
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "description": "All PM2 application output logs",
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{job=\"pm2\"}",
+          "legendFormat": "",
+          "refId": "A" }
+      ],
+      "title": "PM2 App Output Logs",
+      "type": "logs"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "description": "Web server access and error logs",
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 10 },
+      "id": 2,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{job=\"nginx\"}",
+          "legendFormat": "",
+          "refId": "A" }
+      ],
+      "title": "Nginx Access & Error Logs",
+      "type": "logs"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["logs", "loki", "applications"],
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "📋 Applications — Log Viewer",
+  "description": "Real-time application logs from Loki (PM2 and Nginx)",
+  "uid": "app-logs",
+  "version": 1,
+  "style": "dark"
+}
+APPLOGS
+    chmod 644 /var/lib/grafana/dashboards/applications/02-app-logs.json
+    ok "✓ Applications — Log Viewer — PM2 app output + Nginx access/error logs"
+
+    # ─── System Folder: System Logs Dashboard ────────────────────────────────
+    cat > /var/lib/grafana/dashboards/system/01-system-logs.json <<'SYSLOGS'
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "description": "System messages and kernel logs",
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{job=\"syslog\"}",
+          "legendFormat": "",
+          "refId": "A" }
+      ],
+      "title": "System Logs (syslog)",
+      "type": "logs"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "description": "Authentication and sudo logs",
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 8 },
+      "id": 2,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{job=\"auth\"}",
+          "legendFormat": "",
+          "refId": "A" }
+      ],
+      "title": "Authentication Logs (auth)",
+      "type": "logs"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "description": "Kernel and driver logs",
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+      "id": 3,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": false
+      },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{job=\"kern\"}",
+          "legendFormat": "",
+          "refId": "A" }
+      ],
+      "title": "Kernel Logs (kern)",
+      "type": "logs"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "tags": ["logs", "loki", "system"],
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "🖥️  System — Log Viewer",
+  "description": "System-level logs from Loki (syslog, auth, kernel)",
+  "uid": "system-logs",
+  "version": 1,
+  "style": "dark"
+}
+SYSLOGS
+    chmod 644 /var/lib/grafana/dashboards/system/01-system-logs.json
+    ok "✓ System — Log Viewer — System-level logs (syslog, auth, kernel)"
+
+    # ─── Applications Folder: Log Explorer ────────────────────────────────────
+    cat > /var/lib/grafana/dashboards/applications/03-loki-explorer.json <<'LOGDASH'
 {
   "annotations": { "list": [] },
   "editable": true,
@@ -1287,28 +1665,381 @@ PM2DASH
   "version": 1
 }
 LOGDASH
-    chown grafana:grafana "${dash_dir}/loki_logs.json" 2>/dev/null || true
-    ok "Grafana: Log Explorer dashboard provisioned (PM2 + Nginx + System logs)."
+    chmod 644 /var/lib/grafana/dashboards/applications/03-loki-explorer.json
+    ok "✓ Loki — Log Explorer — Free-form log query explorer for debugging & analysis"
 
-    # Start Grafana
-    systemctl daemon-reload
-    systemctl enable --now grafana-server 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-    ok "Grafana service enabled (127.0.0.1:3001)."
-    info "Access Grafana dashboard via SSH tunnel:"
-    info "  ssh -L 3001:localhost:3001 $USERNAME@<server-ip>"
-    info "  Then open: http://localhost:3001  (default login: admin / admin)"
-    info "  ⚠  Change your Grafana password immediately after first login!"
+    info ""
+    info "════════════════════════════════════════════════════════════════"
+    info "📊 GRAFANA DASHBOARD STRUCTURE — PER-APP & PER-CONTAINER"
+    info "════════════════════════════════════════════════════════════════"
+    info ""
+    info "📁 SYSTEM FOLDER (/var/lib/grafana/dashboards/system/)"
+    info "   └─ 🖥️  System — Log Viewer"
+    info "      ├─ System Messages & Kernel Logs (syslog)"
+    info "      ├─ Authentication & Sudo Activity (auth)"
+    info "      └─ Kernel & Driver Logs (kern)"
+    info ""
+    info "📁 APPLICATIONS FOLDER — PER-APP MONITORING SUITE"
+    info "   (/var/lib/grafana/dashboards/applications/)"
+    info "   │"
+    info "   ├─ 🎯 TEMPLATES (Use as base for each app):"
+    info "   │  ├─ Template — App Metrics & Status"
+    info "   │  │  ├─ Real-time app status (online/offline)"
+    info "   │  │  ├─ CPU usage for selected app"
+    info "   │  │  ├─ Memory usage for selected app"
+    info "   │  │  ├─ Restart counts & reliability"
+    info "   │  │  └─ Uptime & instance tracking"
+    info "   │  │"
+    info "   │  ├─ Template — App Logs & Activity"
+    info "   │  │  ├─ Application output logs"
+    info "   │  │  ├─ Application error logs"
+    info "   │  │  ├─ Nginx logs for app"
+    info "   │  │  └─ Request patterns & trends"
+    info "   │  │"
+    info "   │  ├─ Template — App Errors & Health"
+    info "   │  │  ├─ Error count & rate for app"
+    info "   │  │  ├─ Error trends over time"
+    info "   │  │  ├─ Error distribution by type"
+    info "   │  │  └─ Health score computation"
+    info "   │  │"
+    info "   │  └─ 🔍 Loki — Log Explorer (search all apps)"
+    info "   │     └─ Free-form log queries across all data"
+    info ""
+    info "📁 DOCKER FOLDER — PER-CONTAINER MONITORING SUITE"
+    info "   (/var/lib/grafana/dashboards/docker/)"
+    info "   │"
+    info "   ├─ 🎯 TEMPLATES (Use as base for each container):"
+    info "   │  ├─ Template — Container Metrics & Status"
+    info "   │  │  ├─ Container running status"
+    info "   │  │  ├─ CPU & memory metrics"
+    info "   │  │  ├─ Memory limit & utilization %"
+    info "   │  │  ├─ Restart counts"
+    info "   │  │  └─ Uptime tracking"
+    info "   │  │"
+    info "   │  ├─ Template — Container Logs & Activity"
+    info "   │  │  ├─ Application logs from container"
+    info "   │  │  ├─ Error and warning logs"
+    info "   │  │  ├─ Log volume trends"
+    info "   │  │  └─ Error rate metrics"
+    info "   │  │"
+    info "   │  └─ Template — Container Network & Disk I/O"
+    info "   │     ├─ Network received/transmitted (MB/s)"
+    info "   │     ├─ Disk reads/writes (MB/s)"
+    info "   │     ├─ Network packets and errors"
+    info "   │     └─ I/O performance tracking"
+    info ""
+    info "📁 LOGS FOLDER (/var/lib/grafana/dashboards/logs/)"
+    info "   ├─ 📊 Logs — Overview (all apps aggregate)"
+    info "   ├─ ⚠️  Logs — Error Analysis (all apps aggregate)"
+    info "   └─ 💚 Logs — App Health (all apps aggregate)"
+    info ""
+    info "════════════════════════════════════════════════════════════════"
+    info "🎯 HOW TO USE:"
+    info ""
+    info "   📌 FOR APPLICATIONS (PM2 processes):"
+    info "      1. Start with a template dashboard (01-03 in Applications)"
+    info "      2. Duplicate it in Grafana for each of your apps"
+    info "      3. Edit the app_name variable to match your PM2 process name"
+    info "      4. Save with your app name as the dashboard title"
+    info ""
+    info "   🐳 FOR DOCKER CONTAINERS:"
+    info "      1. Start with a template dashboard (01-03 in Docker)"
+    info "      2. Duplicate it in Grafana for each of your containers"
+    info "      3. Edit the container_name variable to match your container name"
+    info "      4. Save with your container name as the dashboard title"
+    info ""
+    info "📌 QUICK NAVIGATION:"
+    info "   • Single app metrics?        → Duplicate 01-template-app-metrics.json"
+    info "   • Single app logs?           → Duplicate 02-template-app-logs.json"
+    info "   • Single app errors?         → Duplicate 03-template-app-errors.json"
+    info "   • Single container metrics?  → Duplicate 01-template-container-metrics.json"
+    info "   • Single container logs?     → Duplicate 02-template-container-logs.json"
+    info "   • Container network/disk?    → Duplicate 03-template-container-io.json"
+    info "   • Compare multiple apps?     → Use Logs folder (system-wide aggregate)"
+    info "   • Free-form log search?      → Use Loki — Log Explorer"
+    info "════════════════════════════════════════════════════════════════"
+    info ""
 
-    # ── D. PM2 log rotation module ────────────────────────────────────────────
+    # ── D. PM2 logging configuration & log rotation ───────────────────────────
     if $INSTALL_PM2; then
+        # 1. Enhanced PM2 logging format with timestamps
+        su - "$USERNAME" -c "
+            export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"
+            pm2 config set module_conf \"{\\\"pm2-logrotate\\\":{\\\"max_size\\\":\\\"50M\\\",\\\"retain\\\":10,\\\"compress\\\":true,\\\"cron\\\":\\\"0 0 * * *\\\"}}\" 2>/dev/null || true
+        " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+
+        # 2. Install pm2-logrotate for automatic log rotation
         su - "$USERNAME" -c "
             export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"
             pm2 install pm2-logrotate 2>/dev/null || true
             pm2 set pm2-logrotate:max_size 50M 2>/dev/null || true
             pm2 set pm2-logrotate:retain 10   2>/dev/null || true
             pm2 set pm2-logrotate:compress true 2>/dev/null || true
+            pm2 set pm2-logrotate:cron '0 0 * * *' 2>/dev/null || true
+            pm2 set pm2-logrotate:dateFormat 'YYYY-MM-DD_HH-mm-ss' 2>/dev/null || true
         " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-        ok "PM2 log rotation module installed (50MB max, 10 files, compressed)."
+        ok "PM2 log rotation module installed:"
+        echo -e "  ${GRY}   • Max size: 50MB per log file${R}"
+        echo -e "  ${GRY}   • Retention: 10 rotated files${R}"
+        echo -e "  ${GRY}   • Compression: enabled${R}"
+        echo -e "  ${GRY}   • Daily rotation: 00:00 UTC${R}"
+
+        # 3. Create global PM2 default config file for auto-logging
+        local pm2_home="/home/${USERNAME}/.pm2"
+        mkdir -p "$pm2_home"
+        
+        cat > "$pm2_home/conf.js" <<'PM2CONF'
+// PM2 Global Configuration
+// Automatically applied to ALL pm2 start commands
+module.exports = {
+  // Default logging behavior for any app started
+  apps: [],
+  
+  // Global defaults (inherited by all apps)
+  default_options: {
+    // Log file paths — auto-created with app name
+    output: null,          // Set dynamically per app
+    error: null,           // Set dynamically per app
+    log: null,             // Combined logs
+    log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+    
+    // Core settings
+    autorestart: true,
+    max_restarts: 10,
+    min_uptime: '10s',
+    max_memory_restart: '500M',
+    
+    // Ensure stdout/stderr captured
+    merge_logs: false,
+    
+    // Don't watch node_modules
+    ignore_watch: ['node_modules', '.git', 'logs', 'dist']
+  }
+};
+PM2CONF
+        chown "$USERNAME:$USERNAME" "$pm2_home/conf.js"
+        ok "PM2 global config created (auto-applies to all apps)."
+
+        # 4. Create auto-logging wrapper helper script
+        local pm2_bin
+        pm2_bin=$(su - "$USERNAME" -c 'export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"; which pm2' 2>/dev/null || echo "")
+        
+        if [[ -n "$pm2_bin" ]]; then
+            cat > "$pm2_home/pm2-start-logs.sh" <<'PM2STARTSCRIPT'
+#!/bin/bash
+# pm2-start-logs.sh — PM2 app start with AUTOMATIC detailed logging
+# 
+# Usage:
+#   pm2-start-logs app.js                    # Auto: app-out.log + app-error.log
+#   pm2-start-logs app.js --name myapp       # Auto: myapp-out.log + myapp-error.log
+#   pm2-start-logs app.js --name api -- --port 3000
+#
+# Logs are automatically saved to: ~/.pm2/logs/
+# Each app gets separate output and error logs with timestamps
+
+set -euo pipefail
+
+# Detect app name
+get_app_name() {
+    local script="$1"
+    shift
+    
+    # Check if --name is provided
+    for i in "$@"; do
+        if [[ "$prev" == "--name" ]]; then
+            echo "$i"
+            return 0
+        fi
+        prev="$i"
+    done
+    
+    # Fall back to script name without extension
+    basename "$script" | sed 's/\.[^.]*$//'
+}
+
+# Get NVM setup
+setup_nvm() {
+    if [[ ! -f "$HOME/.nvm/nvm.sh" ]]; then
+        echo "Error: NVM not found. Please install via init.sh first."
+        return 1
+    fi
+    export NVM_DIR="$HOME/.nvm"
+    source "$NVM_DIR/nvm.sh"
+    return 0
+}
+
+# Main logic
+if [[ $# -eq 0 ]]; then
+    echo "Usage: pm2-start-logs <app.js> [pm2-options]"
+    echo "Example: pm2-start-logs app.js --name myapp -- --port 3000"
+    echo ""
+    echo "Logs auto-saved to: ~/.pm2/logs/<app-name>-{out,error}.log"
+    exit 1
+fi
+
+setup_nvm || exit 1
+
+local script="$1"
+shift
+local app_name=$(get_app_name "$script" "$@")
+local logs_dir="$HOME/.pm2/logs"
+
+# Ensure logs directory exists
+mkdir -p "$logs_dir"
+
+# Start app with automatic logging
+pm2 start "$script" \
+    --name "$app_name" \
+    --output "$logs_dir/${app_name}-out.log" \
+    --error "$logs_dir/${app_name}-error.log" \
+    --log-date-format 'YYYY-MM-DD HH:mm:ss Z' \
+    "$@" 2>&1
+
+echo ""
+echo "✓ App started: $app_name"
+echo "  Output logs: $logs_dir/${app_name}-out.log"
+echo "  Error logs:  $logs_dir/${app_name}-error.log"
+echo ""
+echo "View logs:"
+echo "  pm2 logs $app_name          (live)"
+echo "  plog_app $app_name          (last 100 lines)"
+echo "  plog_errors $app_name       (errors only)"
+echo ""
+PM2STARTSCRIPT
+            chmod +x "$pm2_home/pm2-start-logs.sh"
+            chown "$USERNAME:$USERNAME" "$pm2_home/pm2-start-logs.sh"
+            ok "PM2 auto-logging wrapper script created."
+            echo -e "  ${GRY}   Usage: pm2-start-logs app.js --name myapp${R}"
+            echo -e "  ${GRY}   (Auto creates separate output + error logs)${R}"
+        fi
+
+        # 5. Create enhanced ecosystem.config.js template
+        cat > "$pm2_home/ecosystem.template.js" <<'ECOSYSTEMTEMPLATE'
+// PM2 Ecosystem Configuration Template
+// Each app gets its own detailed logs with timestamps and separation
+// Usage: pm2 start ecosystem.config.js
+
+module.exports = {
+  apps: [
+    // ──────────────────────────────────────────────────────────────
+    // APP 1: Main API Server
+    // ──────────────────────────────────────────────────────────────
+    {
+      name: 'api-server',
+      script: 'app.js',
+      cwd: '/home/username/projects/api',
+      
+      // Logging: Detailed output and error logs
+      output: '/home/username/.pm2/logs/api-server-out.log',
+      error: '/home/username/.pm2/logs/api-server-error.log',
+      
+      // Log format with timestamps
+      log: '/home/username/.pm2/logs/api-server-combined.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      
+      // Process management
+      instances: 1,
+      exec_mode: 'cluster',
+      instance_var: 'INSTANCE_ID',
+      
+      // Environment variables
+      env: {
+        NODE_ENV: 'production',
+        PORT: 3000,
+        LOG_LEVEL: 'info'
+      },
+      
+      // Restart policies
+      watch: false,
+      ignore_watch: ['node_modules', '.git', 'logs'],
+      max_memory_restart: '500M',
+      autorestart: true,
+      max_restarts: 10,
+      min_uptime: '10s',
+      
+      // Process signals
+      kill_timeout: 5000,
+      listen_timeout: 3000,
+      shutdown_with_message: false
+    },
+
+    // ──────────────────────────────────────────────────────────────
+    // APP 2: Background Jobs Worker
+    // ──────────────────────────────────────────────────────────────
+    {
+      name: 'worker-jobs',
+      script: 'worker.js',
+      cwd: '/home/username/projects/worker',
+      
+      // Detailed separate logging
+      output: '/home/username/.pm2/logs/worker-jobs-out.log',
+      error: '/home/username/.pm2/logs/worker-jobs-error.log',
+      log: '/home/username/.pm2/logs/worker-jobs-combined.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss Z',
+      
+      // Worker-specific settings
+      instances: 2,
+      exec_mode: 'cluster',
+      instance_var: 'WORKER_ID',
+      
+      env: {
+        NODE_ENV: 'production',
+        WORKER_CONCURRENCY: 5,
+        LOG_LEVEL: 'debug'
+      },
+      
+      watch: false,
+      ignore_watch: ['node_modules', '.git', 'logs'],
+      max_memory_restart: '300M'
+    },
+
+    // ──────────────────────────────────────────────────────────────
+    // APP 3: Real-time Service (WebSocket)
+    // ──────────────────────────────────────────────────────────────
+    {
+      name: 'realtime-service',
+      script: 'websocket.js',
+      cwd: '/home/username/projects/realtime',
+      
+      // WebSocket streaming logs
+      output: '/home/username/.pm2/logs/realtime-service-out.log',
+      error: '/home/username/.pm2/logs/realtime-service-error.log',
+      log: '/home/username/.pm2/logs/realtime-service-combined.log',
+      log_date_format: 'YYYY-MM-DD HH:mm:ss.SSS Z',
+      
+      instances: 1,
+      exec_mode: 'fork',
+      
+      env: {
+        NODE_ENV: 'production',
+        PORT: 4000,
+        LOG_LEVEL: 'verbose'
+      },
+      
+      watch: false,
+      max_memory_restart: '200M',
+      error_file: '/home/username/.pm2/logs/realtime-error-detailed.log',
+      out_file: '/home/username/.pm2/logs/realtime-output-detailed.log'
+    }
+  ],
+
+  // Global PM2 settings
+  deploy: {
+    production: {
+      user: 'username',
+      host: 'your-server.com',
+      ref: 'origin/main',
+      repo: 'git@github.com:you/repo.git',
+      path: '/home/username/projects/production'
+    }
+  }
+};
+ECOSYSTEMTEMPLATE
+        chown "$USERNAME:$USERNAME" "$pm2_home/ecosystem.template.js"
+        ok "PM2 ecosystem.config.js template created → ~/.pm2/ecosystem.template.js"
+        echo -e "  ${GRY}   Customize and use: cp ~/.pm2/ecosystem.template.js ecosystem.config.js${R}"
+        echo -e "  ${GRY}   Then start: pm2 start ecosystem.config.js${R}"
+    fi
 
         # Install pm2-prometheus-exporter so PM2 process states appear in Grafana
         su - "$USERNAME" -c "
@@ -1635,7 +2366,769 @@ PTSVC
         ok "Promtail service already configured."
     fi
 
-    # Restart Grafana to pick up the new Loki datasource and PM2 dashboard
+    # ── G. ClickHouse — 2-day short-term log backend (analytical queries) ──────
+    # ClickHouse is great for fast log analysis with retention policies
+    info "Installing ClickHouse for 2-day short-term logging..."
+    
+    if ! command -v clickhouse-client &>/dev/null; then
+        # Add ClickHouse repository
+        apt-get install -y apt-transport-https ca-certificates dirmngr gnupg 2>&1 | tail -2 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        echo "deb https://packages.clickhouse.com/deb stable main" | tee /etc/apt/sources.list.d/clickhouse.list 2>/dev/null || true
+        apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv E0C9851CC6E98FB3 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        apt-get update -qq 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        apt-get install -y clickhouse-server clickhouse-client 2>&1 | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        ok "ClickHouse installed."
+    else
+        ok "ClickHouse already installed."
+    fi
+
+    # Create ClickHouse config directory
+    mkdir -p /etc/clickhouse-server/config.d
+    
+    # Configure ClickHouse for production with proper retention
+    if [[ ! -f /etc/clickhouse-server/config.d/logging.xml ]]; then
+        cat > /etc/clickhouse-server/config.d/logging.xml <<'CHCFG'
+<yandex>
+    <!-- Log levels: trace, debug, information, warning, error, fatal -->
+    <logger>
+        <level>warning</level>
+        <log>/var/log/clickhouse-server/clickhouse-server.log</log>
+        <errorlog>/var/log/clickhouse-server/clickhouse-server.err.log</errorlog>
+        <size>1000M</size>
+        <count>10</count>
+    </logger>
+    
+    <!-- Query log for performance analysis -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <partition_by>toYYYYMM(event_time)</partition_by>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+    </query_log>
+
+    <!-- HTTP interface on port 17123 -->
+    <http_port>17123</http_port>
+    <tcp_port>19000</tcp_port>
+    
+    <listen_host>127.0.0.1</listen_host>
+</yandex>
+CHCFG
+        chown clickhouse:clickhouse /etc/clickhouse-server/config.d/logging.xml
+        ok "ClickHouse logging config created."
+    fi
+
+    # Start ClickHouse
+    systemctl daemon-reload
+    systemctl enable --now clickhouse-server 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+    sleep 3  # Wait for ClickHouse to start
+    ok "ClickHouse service enabled (127.0.0.1:17123 HTTP, 19000 TCP)."
+
+    # Create PM2 logs table with 2-day TTL
+    if ! clickhouse-client --query "SHOW TABLES FROM pm2_logs" 2>/dev/null | grep -q "logs"; then
+        info "Creating ClickHouse unified log schema (PM2 + System + Nginx → ClickHouse)..."
+        clickhouse-client <<'CHSQL' 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+CREATE DATABASE IF NOT EXISTS pm2_logs;
+
+-- Main unified logs table (all types: PM2, system, nginx)
+CREATE TABLE IF NOT EXISTS pm2_logs.logs (
+    timestamp DateTime DEFAULT now(),
+    log_type Enum('pm2', 'system', 'nginx', 'syslog', 'auth', 'kern', 'other') = 'other',
+    app_name String,
+    log_level String,
+    message String,
+    hostname String DEFAULT 'localhost',
+    source_file String DEFAULT '',
+    process_id UInt32 DEFAULT 0,
+    received_at DateTime DEFAULT now()
+) ENGINE = MergeTree()
+ORDER BY (timestamp, log_type, app_name)
+PARTITION BY toYYYYMMDD(timestamp)
+TTL timestamp + INTERVAL 2 DAY DELETE
+SETTINGS ttl_only_drop_parts = 1;
+
+-- Buffer table for batching writes (improves performance)
+CREATE TABLE IF NOT EXISTS pm2_logs.logs_buffer AS pm2_logs.logs
+ENGINE = Buffer(pm2_logs, logs, 16, 10, 60, 100000, 1000000, 10485760, 104857600);
+
+-- PM2 logs table (for specific PM2 querying)
+CREATE TABLE IF NOT EXISTS pm2_logs.pm2_logs (
+    timestamp DateTime DEFAULT now(),
+    app_name String,
+    log_level String,
+    message String,
+    hostname String DEFAULT 'localhost',
+    received_at DateTime DEFAULT now()
+) ENGINE = MergeTree()
+ORDER BY (timestamp, app_name)
+PARTITION BY toYYYYMMDD(timestamp)
+TTL timestamp + INTERVAL 2 DAY DELETE;
+
+-- System logs table (syslog, auth, kern)
+CREATE TABLE IF NOT EXISTS pm2_logs.system_logs (
+    timestamp DateTime DEFAULT now(),
+    log_type Enum('syslog', 'auth', 'kern') = 'syslog',
+    hostname String DEFAULT 'localhost',
+    facility String DEFAULT '',
+    severity String DEFAULT '',
+    message String,
+    received_at DateTime DEFAULT now()
+) ENGINE = MergeTree()
+ORDER BY (timestamp, log_type)
+PARTITION BY toYYYYMMDD(timestamp)
+TTL timestamp + INTERVAL 2 DAY DELETE;
+
+-- Nginx logs table
+CREATE TABLE IF NOT EXISTS pm2_logs.nginx_logs (
+    timestamp DateTime DEFAULT now(),
+    hostname String DEFAULT 'localhost',
+    remote_addr String,
+    request_method String,
+    request_path String,
+    http_status UInt16,
+    response_time_ms Float32,
+    bytes_sent UInt64,
+    user_agent String,
+    received_at DateTime DEFAULT now()
+) ENGINE = MergeTree()
+ORDER BY (timestamp, hostname)
+PARTITION BY toYYYYMMDD(timestamp)
+TTL timestamp + INTERVAL 2 DAY DELETE;
+
+CHSQL
+        ok "ClickHouse: Unified log tables created (2-day auto-retention)."
+    else
+        ok "ClickHouse: Log tables already exist."
+    fi
+
+    # Create HTTP endpoint for PM2 logs insertion
+    if [[ ! -f /etc/clickhouse-server/config.d/http_listen.xml ]]; then
+        cat > /etc/clickhouse-server/config.d/http_listen.xml <<'CHHTTP'
+<yandex>
+    <!-- HTTP interface for log insertion -->
+    <http_port>17123</http_port>
+    <tcp_port>19000</tcp_port>
+    <listen_host>127.0.0.1</listen_host>
+    
+    <!-- Allow inserts from localhost -->
+    <http_handlers>
+        <rule>
+            <url_regex>^/api/.*</url_regex>
+            <handler>static</handler>
+            <content_type>application/json</content_type>
+            <response_content>/etc/clickhouse-server/not_found.html</response_content>
+        </rule>
+    </http_handlers>
+</yandex>
+CHHTTP
+        chown clickhouse:clickhouse /etc/clickhouse-server/config.d/http_listen.xml
+        ok "ClickHouse HTTP endpoint configured."
+    fi
+
+    # Create PM2 log shipper script (sends PM2 logs to ClickHouse)
+    if [[ $INSTALL_PM2 == true ]]; then
+        local pm2_logs_shipper="/usr/local/bin/pm2-logs-to-clickhouse"
+        cat > "$pm2_logs_shipper" <<'PM2SHIPPER'
+#!/bin/bash
+# pm2-logs-to-clickhouse.sh — Ship PM2 logs to ClickHouse & cleanup local storage
+# 
+# Monitors ~/.pm2/logs/, ships to ClickHouse, then deletes local files
+# Saves disk space while maintaining analytics in ClickHouse (2-day retention)
+
+set -euo pipefail
+
+CLICKHOUSE_HOST="${CLICKHOUSE_HOST:-127.0.0.1}"
+CLICKHOUSE_PORT="${CLICKHOUSE_PORT:-17123}"
+CLICKHOUSE_DB="${CLICKHOUSE_DB:-pm2_logs}"
+CLICKHOUSE_TABLE="${CLICKHOUSE_TABLE:-logs}"
+PM2_LOGS_DIR="${HOME}/.pm2/logs"
+STATE_FILE="${HOME}/.pm2/logs-shipped.state"
+LOG_DELETE_AFTER=${LOG_DELETE_AFTER:-1800}  # Delete after 30 min (5400=90 min, 1800=30 min)
+
+# Initialize state file
+[[ ! -f "$STATE_FILE" ]] && echo "0" > "$STATE_FILE"
+
+ship_logs() {
+    local app_name="$1"
+    local log_file="$2"
+    local log_type="${3:-pm2}"
+    
+    [[ ! -f "$log_file" ]] && return 1
+    
+    local shipped_lines=$(grep "$log_file" "$STATE_FILE" 2>/dev/null | cut -d: -f2 || echo "0")
+    local total_lines=$(wc -l < "$log_file" 2>/dev/null || echo "0")
+    
+    if (( total_lines > shipped_lines )); then
+        # Extract new lines
+        local new_logs=$(tail -n +$((shipped_lines + 1)) "$log_file" 2>/dev/null | head -n $((total_lines - shipped_lines)))
+        local ship_success=1
+        
+        # Parse and send to ClickHouse
+        echo "$new_logs" | while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            
+            # Extract timestamp and message
+            local timestamp=$(echo "$line" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}' || echo "$(date '+%Y-%m-%d %H:%M:%S')")
+            local message=$(echo "$line" | sed 's/^[0-9: -]* //' | tr -d "'\"")
+            local log_level="INFO"
+            [[ "$message" =~ ERROR|error ]] && log_level="ERROR"
+            [[ "$message" =~ WARN|warn ]] && log_level="WARN"
+            [[ "$message" =~ SUCCESS|success ]] && log_level="SUCCESS"
+            
+            # Insert into ClickHouse (with retry)
+            local retry=0
+            while (( retry < 3 )); do
+                if curl -s --max-time 5 "http://${CLICKHOUSE_HOST}:${CLICKHOUSE_PORT}/" \
+                    -d "INSERT INTO ${CLICKHOUSE_DB}.${CLICKHOUSE_TABLE} 
+                        (log_type, app_name, log_level, message, timestamp) 
+                        VALUES ('${log_type}', '${app_name}', '${log_level}', '${message}', '${timestamp}')" \
+                    2>/dev/null | grep -q 'Ok\|^$'; then
+                    break
+                fi
+                (( retry++ ))
+                sleep 1
+            done
+        done
+        
+        # Update state
+        sed -i "/${log_file}/d" "$STATE_FILE" 2>/dev/null || true
+        echo "$log_file:$total_lines" >> "$STATE_FILE"
+        return 0
+    fi
+    return 1
+}
+
+cleanup_shipped_logs() {
+    local log_file="$1"
+    [[ ! -f "$log_file" ]] && return
+    
+    # Only delete if it's older than LOG_DELETE_AFTER seconds
+    local file_mtime=$(stat -c %Y "$log_file" 2>/dev/null || stat -f %m "$log_file" 2>/dev/null || echo 0)
+    local now=$(date +%s)
+    local age=$(( now - file_mtime ))
+    
+    if (( age > LOG_DELETE_AFTER )); then
+        rm -f "$log_file"
+    fi
+}
+
+# Monitor PM2 logs directory
+while true; do
+    if [[ -d "$PM2_LOGS_DIR" ]]; then
+        # Ship new logs
+        for log_file in "$PM2_LOGS_DIR"/*-out.log "$PM2_LOGS_DIR"/*-error.log; do
+            [[ -f "$log_file" ]] || continue
+            app_name=$(basename "$log_file" | sed 's/-out\.log\|-error\.log//')
+            ship_logs "$app_name" "$log_file" "pm2" || true
+        done
+        
+        # Cleanup old shipped logs (after 30 min in ClickHouse)
+        for log_file in "$PM2_LOGS_DIR"/*-out.log "$PM2_LOGS_DIR"/*-error.log "$PM2_LOGS_DIR"/*.gz; do
+            [[ -f "$log_file" ]] && cleanup_shipped_logs "$log_file"
+        done
+    fi
+    sleep 5  # Check every 5 seconds
+done
+PM2SHIPPER
+        chmod +x "$pm2_logs_shipper"
+        ok "PM2 log shipper created → $pm2_logs_shipper"
+        
+        # Create systemd service for PM2 log shipper
+        cat > /etc/systemd/system/pm2-logs-clickhouse.service <<'PM2SVC'
+[Unit]
+Description=PM2 Logs to ClickHouse Shipper
+After=pm2-stack.service clickhouse-server.service
+Wants=pm2-stack.service clickhouse-server.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/pm2-logs-to-clickhouse
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment="HOME=/root"
+
+[Install]
+WantedBy=multi-user.target
+PM2SVC
+        systemctl daemon-reload
+        systemctl enable --now pm2-logs-clickhouse 2>/dev/null || true
+        ok "PM2 log shipper service enabled (ships to ClickHouse & auto-deletes local files)."
+    fi
+
+    # ── H. Create Professional Grafana Log Analytics Dashboards ────────────────────
+    info "Creating professional log analytics dashboard suite..."
+    
+    # Create dashboard provider for Logs folder
+    if [[ ! -f /etc/grafana/provisioning/dashboards/logs.yaml ]]; then
+        cat > /etc/grafana/provisioning/dashboards/logs.yaml <<LOGSPROV
+apiVersion: 1
+providers:
+  - name: 'Logs'
+    orgId: 1
+    folder: 'Logs'
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards/logs
+LOGSPROV
+        chown grafana:grafana /etc/grafana/provisioning/dashboards/logs.yaml 2>/dev/null || true
+        ok "Dashboard provider created for 'Logs' folder."
+    fi
+    
+    # Create dashboards directory
+    mkdir -p /var/lib/grafana/dashboards/logs 2>/dev/null || true
+    
+    # 1. Template Dashboard for Per-App Metrics
+    cat > /var/lib/grafana/dashboards/applications/01-template-app-metrics.json <<'DASHBOARD_TEMPLATE_METRICS'
+{
+  "dashboard": {
+    "title": "📊 Template — App Metrics & Status",
+    "description": "Use this as a template: duplicate & change app_name for per-app monitoring. Shows real-time status, CPU, memory, restarts for ONE selected app.",
+    "timezone": "browser",
+    "templating": {
+      "list": [
+        {
+          "name": "app_name",
+          "type": "textbox",
+          "label": "App Name",
+          "description": "Set to PM2 process name (your actual app name)"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "title": "App Status",
+        "description": "Real-time status for this app",
+        "targets": [{"expr": "SELECT status FROM pm2_process_metrics WHERE process_name = $${app_name}$ LIMIT 1"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "CPU Usage (%)",
+        "description": "CPU for this app only",
+        "targets": [{"expr": "SELECT cpu_usage FROM pm2_process_metrics WHERE process_name = $${app_name}$"}],
+        "type": "timeseries",
+        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Memory (MB)",
+        "description": "Memory for this app only",
+        "targets": [{"expr": "SELECT memory_mb FROM pm2_process_metrics WHERE process_name = $${app_name}$"}],
+        "type": "timeseries",
+        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Restart Count",
+        "description": "Total restarts for this app",
+        "targets": [{"expr": "SELECT restart_count FROM pm2_process_metrics WHERE process_name = $${app_name}$ ORDER BY timestamp DESC LIMIT 1"}],
+        "type": "stat",
+        "gridPos": {"x": 18, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Uptime (Hours)",
+        "description": "How long this app has been running",
+        "targets": [{"expr": "SELECT uptime_hours FROM pm2_process_metrics WHERE process_name = $${app_name}$ ORDER BY timestamp DESC LIMIT 1"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 3, "w": 6, "h": 3}
+      },
+      {
+        "title": "Process Instances",
+        "description": "Number of instances/workers for this app",
+        "targets": [{"expr": "SELECT instance_count FROM pm2_process_metrics WHERE process_name = $${app_name}$ ORDER BY timestamp DESC LIMIT 1"}],
+        "type": "stat",
+        "gridPos": {"x": 6, "y": 3, "w": 6, "h": 3}
+      }
+    ],
+    "refresh": "15s",
+    "time": {"from": "now-6h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+DASHBOARD_TEMPLATE_METRICS
+    
+    # 2. Template Dashboard for Per-App Logs
+    cat > /var/lib/grafana/dashboards/applications/02-template-app-logs.json <<'DASHBOARD_TEMPLATE_LOGS'
+{
+  "dashboard": {
+    "title": "📋 Template — App Logs & Activity",
+    "description": "Use this as a template: duplicate & change app_name for per-app logs. Shows application output, errors, and request patterns for ONE selected app.",
+    "timezone": "browser",
+    "templating": {
+      "list": [
+        {
+          "name": "app_name",
+          "type": "textbox",
+          "label": "App Name",
+          "description": "Set to PM2 process name (your actual app name)"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "title": "Total Logs (24h)",
+        "targets": [{"expr": "SELECT COUNT() FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Error Count (24h)",
+        "targets": [{"expr": "SELECT COUNT() FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND log_level='ERROR' AND timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Warning Count (24h)",
+        "targets": [{"expr": "SELECT COUNT() FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND log_level='WARN' AND timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Log Volume Trend",
+        "description": "Activity over time for this app",
+        "targets": [{"expr": "SELECT toStartOfHour(timestamp) as time, COUNT(*) FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND timestamp > now() - 86400 GROUP BY time ORDER BY time"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 3, "w": 12, "h": 8}
+      },
+      {
+        "title": "Log Levels Distribution",
+        "description": "Info, warn, error breakdown for this app",
+        "targets": [{"expr": "SELECT log_level, COUNT() FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND timestamp > now() - 86400 GROUP BY log_level"}],
+        "type": "piechart",
+        "gridPos": {"x": 12, "y": 3, "w": 12, "h": 8}
+      },
+      {
+        "title": "Recent Logs (Last 50)",
+        "description": "Latest log entries for this app",
+        "targets": [{"expr": "SELECT timestamp, log_level, message FROM pm2_logs.logs WHERE app_name = $${app_name}$ ORDER BY timestamp DESC LIMIT 50"}],
+        "type": "table",
+        "gridPos": {"x": 0, "y": 11, "w": 24, "h": 10}
+      }
+    ],
+    "refresh": "30s",
+    "time": {"from": "now-24h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+DASHBOARD_TEMPLATE_LOGS
+    
+    # 3. Template Dashboard for Per-App Errors & Health
+    cat > /var/lib/grafana/dashboards/applications/03-template-app-errors.json <<'DASHBOARD_TEMPLATE_ERRORS'
+{
+  "dashboard": {
+    "title": "⚠️  Template — App Errors & Health",
+    "description": "Use this as a template: duplicate & change app_name for per-app monitoring. Shows errors, health score, and incidents for ONE selected app.",
+    "timezone": "browser",
+    "templating": {
+      "list": [
+        {
+          "name": "app_name",
+          "type": "textbox",
+          "label": "App Name",
+          "description": "Set to PM2 process name (your actual app name)"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "title": "Health Score",
+        "description": "100% = no errors, 0% = all errors. Higher is better.",
+        "targets": [{"expr": "SELECT ROUND(100 - (SUM(IF(log_level='ERROR', 1, 0)) * 100 / COUNT()), 1) FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 8, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 80}, {"color": "green", "value": 95}]}}}
+      },
+      {
+        "title": "Error Rate (%)",
+        "targets": [{"expr": "SELECT ROUND(SUM(IF(log_level='ERROR', 1, 0)) * 100 / COUNT(), 2) FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 8, "y": 0, "w": 8, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 10}]}}}
+      },
+      {
+        "title": "Last Error Time",
+        "targets": [{"expr": "SELECT MAX(timestamp) FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND log_level='ERROR'"}],
+        "type": "stat",
+        "gridPos": {"x": 16, "y": 0, "w": 8, "h": 3}
+      },
+      {
+        "title": "Error Trend (Hourly)",
+        "description": "Errors over time for this app",
+        "targets": [{"expr": "SELECT toStartOfHour(timestamp) as time, COUNT() FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND log_level='ERROR' AND timestamp > now() - 86400 GROUP BY time ORDER BY time"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 3, "w": 12, "h": 8}
+      },
+      {
+        "title": "Error Distribution by Type",
+        "description": "Top error types for this app",
+        "targets": [{"expr": "SELECT message, COUNT() as count FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND log_level='ERROR' AND timestamp > now() - 86400 GROUP BY message ORDER BY count DESC LIMIT 10"}],
+        "type": "bargauge",
+        "gridPos": {"x": 12, "y": 3, "w": 12, "h": 8}
+      },
+      {
+        "title": "Recent Errors (Last 30)",
+        "description": "Latest errors for this app",
+        "targets": [{"expr": "SELECT timestamp, log_level, message FROM pm2_logs.logs WHERE app_name = $${app_name}$ AND log_level='ERROR' ORDER BY timestamp DESC LIMIT 30"}],
+        "type": "table",
+        "gridPos": {"x": 0, "y": 11, "w": 24, "h": 10}
+      }
+    ],
+    "refresh": "30s",
+    "time": {"from": "now-24h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+DASHBOARD_TEMPLATE_ERRORS
+      },
+      {
+        "title": "Error Trend (24h)",
+        "description": "Hourly error count over last 24 hours",
+        "targets": [{"expr": "SELECT toStartOfHour(timestamp) as time, COUNT(*) as Errors FROM pm2_logs.logs WHERE log_level='ERROR' AND timestamp > now() - 86400 GROUP BY time ORDER BY time"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 3, "w": 12, "h": 8},
+        "fieldConfig": {"defaults": {"custom": {"lineWidth": 2}, "color": {"mode": "palette-classic"}}}
+      },
+      {
+        "title": "All Logs Trend (24h)",
+        "description": "Hourly log volume over last 24 hours",
+        "targets": [{"expr": "SELECT toStartOfHour(timestamp) as time, COUNT(*) as Volume FROM pm2_logs.logs WHERE timestamp > now() - 86400 GROUP BY time ORDER BY time"}],
+        "type": "timeseries",
+        "gridPos": {"x": 12, "y": 3, "w": 12, "h": 8},
+        "fieldConfig": {"defaults": {"custom": {"lineWidth": 2}, "color": {"mode": "palette-classic"}}}
+      },
+      {
+        "title": "Log Distribution by Level",
+        "description": "Percentage breakdown: ERROR, WARN, INFO, SUCCESS",
+        "targets": [{"expr": "SELECT log_level, COUNT() as count FROM pm2_logs.logs WHERE timestamp > now() - 86400 GROUP BY log_level"}],
+        "type": "piechart",
+        "gridPos": {"x": 0, "y": 11, "w": 8, "h": 8}
+      },
+      {
+        "title": "Top 10 Apps by Error Count",
+        "description": "Apps with most errors in last 24h",
+        "targets": [{"expr": "SELECT app_name, COUNT() as Errors FROM pm2_logs.logs WHERE log_level='ERROR' AND timestamp > now() - 86400 GROUP BY app_name ORDER BY Errors DESC LIMIT 10"}],
+        "type": "bargauge",
+        "gridPos": {"x": 8, "y": 11, "w": 8, "h": 8}
+      },
+      {
+        "title": "Health Score by App",
+        "description": "Lower error rate = healthier. Error rate % per app",
+        "targets": [{"expr": "SELECT app_name, ROUND(100 - (SUM(IF(log_level='ERROR', 1, 0)) * 100 / COUNT()), 2) as health FROM pm2_logs.logs WHERE timestamp > now() - 86400 GROUP BY app_name ORDER BY health DESC LIMIT 15"}],
+        "type": "bargauge",
+        "gridPos": {"x": 16, "y": 11, "w": 8, "h": 8}
+      },
+      {
+        "title": "App Activity (24h Summary)",
+        "description": "Total logs, errors, and error rate per app",
+        "targets": [{"expr": "SELECT app_name, COUNT() as total_logs, SUM(IF(log_level='ERROR', 1, 0)) as errors, ROUND(SUM(IF(log_level='ERROR', 1, 0)) * 100 / COUNT(), 2) as error_rate_pct FROM pm2_logs.logs WHERE timestamp > now() - 86400 GROUP BY app_name ORDER BY error_rate_pct DESC LIMIT 20"}],
+        "type": "table",
+        "gridPos": {"x": 0, "y": 19, "w": 24, "h": 8}
+      }
+    ],
+    "refresh": "30s",
+    "time": {"from": "now-24h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+DASHBOARD_TEMPLATE_ERRORS
+
+
+    
+    # Create Logs folder copies for aggregate dashboards (for backward compatibility)
+    cat > /var/lib/grafana/dashboards/logs/01-overview.json <<'DASHBOARD_AGGREGATE_OVERVIEW'
+{
+  "dashboard": {
+    "title": "📊 Logs — Overview",
+    "description": "Aggregate log analytics across ALL applications: error rates, trends, overall health",
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Total Logs (24h)",
+        "targets": [{"expr": "SELECT COUNT() FROM pm2_logs.logs WHERE timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}}
+      },
+      {
+        "title": "Error Rate (%)",
+        "targets": [{"expr": "SELECT ROUND(SUM(IF(log_level='ERROR', 1, 0)) * 100 / COUNT(), 2) FROM pm2_logs.logs WHERE timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 10}]}}}
+      },
+      {
+        "title": "Warning Rate (%)",
+        "targets": [{"expr": "SELECT ROUND(SUM(IF(log_level='WARN', 1, 0)) * 100 / COUNT(), 2) FROM pm2_logs.logs WHERE timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10}, {"color": "orange", "value": 20}]}}}
+      },
+      {
+        "title": "Top Error-Prone Apps",
+        "targets": [{"expr": "SELECT app_name, COUNT() as errors FROM pm2_logs.logs WHERE log_level='ERROR' AND timestamp > now() - 86400 GROUP BY app_name ORDER BY errors DESC LIMIT 10"}],
+        "type": "bargauge",
+        "gridPos": {"x": 18, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Error Trend (24h)",
+        "targets": [{"expr": "SELECT toStartOfHour(timestamp) as time, COUNT() FROM pm2_logs.logs WHERE log_level='ERROR' AND timestamp > now() - 86400 GROUP BY time ORDER BY time"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 3, "w": 12, "h": 8}
+      },
+      {
+        "title": "All Apps Activity",
+        "targets": [{"expr": "SELECT app_name, COUNT() as logs FROM pm2_logs.logs WHERE timestamp > now() - 86400 GROUP BY app_name ORDER BY logs DESC"}],
+        "type": "bargauge",
+        "gridPos": {"x": 12, "y": 3, "w": 12, "h": 8}
+      }
+    ],
+    "refresh": "30s",
+    "time": {"from": "now-24h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+DASHBOARD_AGGREGATE_OVERVIEW
+    
+    cat > /var/lib/grafana/dashboards/logs/02-error-analysis.json <<'DASHBOARD_AGGREGATE_ERRORS'
+{
+  "dashboard": {
+    "title": "⚠️  Logs — Error Analysis",
+    "description": "System-wide error analytics: patterns, distributions, recent incidents across ALL applications",
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Total Errors (24h)",
+        "targets": [{"expr": "SELECT COUNT() FROM pm2_logs.logs WHERE log_level='ERROR' AND timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+      },
+      {
+        "title": "Error Rate (%)",
+        "targets": [{"expr": "SELECT ROUND(SUM(IF(log_level='ERROR', 1, 0)) * 100 / COUNT(), 2) FROM pm2_logs.logs WHERE timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 5}, {"color": "red", "value": 10}]}}}
+      },
+      {
+        "title": "Apps with Errors",
+        "targets": [{"expr": "SELECT COUNT(DISTINCT app_name) FROM pm2_logs.logs WHERE log_level='ERROR' AND timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Errors Last Hour",
+        "targets": [{"expr": "SELECT COUNT() FROM pm2_logs.logs WHERE log_level='ERROR' AND timestamp > now() - 3600"}],
+        "type": "stat",
+        "gridPos": {"x": 18, "y": 0, "w": 6, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 10}]}}}
+      },
+      {
+        "title": "Error Trend (Hourly)",
+        "targets": [{"expr": "SELECT toStartOfHour(timestamp) as time, COUNT() FROM pm2_logs.logs WHERE log_level='ERROR' AND timestamp > now() - 86400 GROUP BY time ORDER BY time"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 3, "w": 12, "h": 8}
+      },
+      {
+        "title": "Errors by App",
+        "targets": [{"expr": "SELECT app_name, COUNT() as errors FROM pm2_logs.logs WHERE log_level='ERROR' AND timestamp > now() - 86400 GROUP BY app_name ORDER BY errors DESC"}],
+        "type": "bargauge",
+        "gridPos": {"x": 12, "y": 3, "w": 12, "h": 8}
+      },
+      {
+        "title": "Recent Errors (Last 50)",
+        "targets": [{"expr": "SELECT timestamp, app_name, message FROM pm2_logs.logs WHERE log_level='ERROR' ORDER BY timestamp DESC LIMIT 50"}],
+        "type": "table",
+        "gridPos": {"x": 0, "y": 11, "w": 24, "h": 10}
+      }
+    ],
+    "refresh": "30s",
+    "time": {"from": "now-24h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+DASHBOARD_AGGREGATE_ERRORS
+    
+    cat > /var/lib/grafana/dashboards/logs/03-app-health.json <<'DASHBOARD_AGGREGATE_HEALTH'
+{
+  "dashboard": {
+    "title": "💚 Logs — App Health",
+    "description": "Cross-application health monitoring: health scores, availability, activity summary for ALL applications",
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "System Health Score",
+        "description": "Overall 100% = no errors, 0% = all errors.",
+        "targets": [{"expr": "SELECT ROUND(100 - (SUM(IF(log_level='ERROR', 1, 0)) * 100 / COUNT()), 1) FROM pm2_logs.logs WHERE timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 8, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "unit": "percent", "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 80}, {"color": "green", "value": 95}]}}}
+      },
+      {
+        "title": "Healthy Apps",
+        "targets": [{"expr": "SELECT COUNT(*) FROM (SELECT app_name FROM pm2_logs.logs WHERE timestamp > now() - 86400 GROUP BY app_name HAVING SUM(IF(log_level='ERROR', 1, 0)) = 0) WHERE 1=1"}],
+        "type": "stat",
+        "gridPos": {"x": 8, "y": 0, "w": 8, "h": 3}
+      },
+      {
+        "title": "Problematic Apps",
+        "targets": [{"expr": "SELECT COUNT(*) FROM (SELECT app_name FROM pm2_logs.logs WHERE timestamp > now() - 86400 GROUP BY app_name HAVING SUM(IF(log_level='ERROR', 1, 0)) > 0) WHERE 1=1"}],
+        "type": "stat",
+        "gridPos": {"x": 16, "y": 0, "w": 8, "h": 3}
+      },
+      {
+        "title": "App Health Summary",
+        "description": "Health score per app (higher = better, no errors = 100%)",
+        "targets": [{"expr": "SELECT app_name, ROUND(100 - (SUM(IF(log_level='ERROR', 1, 0)) * 100 / COUNT()), 1) as health_score, COUNT() as log_volume FROM pm2_logs.logs WHERE timestamp > now() - 86400 GROUP BY app_name ORDER BY health_score DESC"}],
+        "type": "table",
+        "gridPos": {"x": 0, "y": 3, "w": 24, "h": 10}
+      }
+    ],
+    "refresh": "30s",
+    "time": {"from": "now-24h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+DASHBOARD_AGGREGATE_HEALTH
+    
+    chmod 644 /var/lib/grafana/dashboards/logs/*.json 2>/dev/null || true
+    chmod 644 /var/lib/grafana/dashboards/applications/*.json 2>/dev/null || true
+    
+    ok "✓ Per-App Dashboard Templates Created (No Dummy Data)."
+    ok "   Templates: Duplicate and customize for each of your apps"
+    ok "   ├─ 01-template-app-metrics.json → Real-time metrics & status"
+    ok "   ├─ 02-template-app-logs.json → Application logs & activity"
+    ok "   └─ 03-template-app-errors.json → Errors, health score, incidents"
+    ok ""
+    ok "✓ System-Wide Dashboards (in Logs folder for comparison):"
+    ok "   ├─ 01-overview.json → All apps aggregate"
+    ok "   ├─ 02-error-analysis.json → System-wide errors"
+    ok "   └─ 03-app-health.json → Cross-app health"
+    ok ""
+    ok "📌 HOW TO CREATE PER-APP DASHBOARDS:"
+    ok "   1. Duplicate a template dashboard (e.g., 01-template-app-metrics.json)"
+    ok "   2. Open the duplicate in Grafana"
+    ok "   3. Edit template variable 'app_name' and set to your PM2 process name"
+    ok "   4. Save with your app name as dashboard title"
+    ok "   5. Queries auto-filter to show only that app's data"
+
+    # Restart Grafana to pick up the new Loki datasource, dashboards, and ClickHouse integration
     systemctl restart grafana-server 2>/dev/null || true
     sleep 2
     
@@ -1643,12 +3136,12 @@ PTSVC
     systemctl restart prometheus 2>/dev/null || true
     sleep 3
     
-    ok "Grafana restarted — Loki datasource + PM2 dashboard now active."
+    ok "Grafana restarted — All dashboards active (System + PM2 + Logs)."
 
     # ── H. Health Check — Verify all monitoring components are responding ──────
     info "Performing monitoring stack health checks..."
     local checks_passed=0
-    local checks_total=6
+    local checks_total=7
     
     # Check node_exporter
     if curl -sf --max-time 3 "http://127.0.0.1:9100/metrics" &>/dev/null; then
@@ -1683,8 +3176,8 @@ PTSVC
     fi
     
     # Check Grafana
-    if curl -sf --max-time 3 "http://127.0.0.1:3001/api/health" &>/dev/null; then
-        ok "✓ Grafana responding (127.0.0.1:3001)"
+    if curl -sf --max-time 3 "http://127.0.0.1:13001/api/health" &>/dev/null; then
+        ok "✓ Grafana responding (127.0.0.1:13001)"
         (( checks_passed++ ))
     else
         warn "✗ Grafana not responding — restart with: systemctl restart grafana-server"
@@ -1696,6 +3189,14 @@ PTSVC
         (( checks_passed++ ))
     else
         warn "⚠ PM2 exporter not responding yet (may need an app running) — expected for new installations"
+    fi
+    
+    # Check ClickHouse
+    if curl -sf --max-time 3 "http://127.0.0.1:17123/" &>/dev/null; then
+        ok "✓ ClickHouse responding (127.0.0.1:17123)"
+        (( checks_passed++ ))
+    else
+        warn "✗ ClickHouse not responding — restart with: systemctl restart clickhouse-server"
     fi
     
     ok "Health checks: $checks_passed/$checks_total passed"
@@ -1774,7 +3275,7 @@ if command -v ufw &>/dev/null; then
     echo -e "  \${GRY}\${ufw_status}\${R}"
 fi
 
-# ── Log Pipeline (Loki + Promtail) ───────────────────────────────────────────
+# ── Log Pipeline (Loki + Promtail + ClickHouse) ───────────────────────────────
 echo ""
 echo -e "  \${BOLD}\${WHT}Log Pipeline\${R}"
 if systemctl is-active --quiet loki 2>/dev/null; then
@@ -1787,14 +3288,19 @@ if systemctl is-active --quiet promtail 2>/dev/null; then
 else
     echo -e "  \${RED}✘\${R}  Promtail not running  (sudo systemctl start promtail)"
 fi
+if systemctl is-active --quiet clickhouse-server 2>/dev/null; then
+    echo -e "  \${GRN}✔\${R}  ClickHouse running (2-day logs  127.0.0.1:17123)"
+else
+    echo -e "  \${YLW}⚠\${R}  ClickHouse not running  (sudo systemctl start clickhouse-server)"
+fi
 
 # ── Grafana Dashboard ─────────────────────────────────────────────────────────
 echo ""
 echo -e "  \${BOLD}\${WHT}Monitoring Dashboard (Grafana + Prometheus)\${R}"
 if systemctl is-active --quiet grafana-server 2>/dev/null; then
     echo -e "  \${GRN}✔\${R}  Grafana running — access via SSH tunnel:"
-    echo -e "  \${GRY}     ssh -L 3001:localhost:3001 ${deploy_user}@<server-ip>\${R}"
-    echo -e "  \${GRY}     Then open: http://localhost:3001\${R}"
+    echo -e "  \${GRY}     ssh -L 13001:localhost:13001 ${deploy_user}@<server-ip>\${R}"
+    echo -e "  \${GRY}     Then open: http://localhost:13001\${R}"
 else
     echo -e "  \${GRY}  Grafana not running (sudo systemctl start grafana-server)\${R}"
 fi
@@ -1836,7 +3342,7 @@ fi
 
 echo ""
 echo -e "  \${GRY}\${HR}\${R}"
-echo -e "  \${GRY}PM2 live: pm2 monit  │  App logs: pm2 logs  │  Grafana: http://localhost:3001\${R}"
+echo -e "  \${GRY}PM2 live: pm2 monit  │  App logs: pm2 logs  │  Grafana: http://localhost:13001\${R}"
 echo ""
 STATUSSCRIPT
 
@@ -1952,7 +3458,7 @@ setup_firewall() {
     run "ufw default deny incoming"
     run "ufw default allow outgoing"
     run "ufw allow $ssh_port/tcp   comment 'SSH'"
-    # Monitoring ports (9090/9100/3001) are bound to 127.0.0.1 — no UFW rule needed
+    # Monitoring ports (9090/9100/13001) are bound to 127.0.0.1 — no UFW rule needed
 
     if [[ "$OPEN_NGINX_PORTS" == true ]]; then
         run "ufw allow 80/tcp comment 'HTTP'"
@@ -2017,7 +3523,7 @@ setup_logrotate() {
 LOGROTATE
     chmod 644 "/etc/logrotate.d/$USERNAME"
 
-    ok "Logrotate: PM2 logs 14-day retention, daily rotation, compressed."
+    ok "Logrotate configured (backup rotation only — main logs deleted by shipper)."
 
     section_end
 }
@@ -2047,7 +3553,7 @@ print_summary() {
     _row "PM2 Service"    "pm2-${USERNAME}  (systemd — auto-starts on reboot)"
     _row "SSH Access"     "password + SSH key  (both supported)"
     _row "Root Access"    "ssh ${USERNAME}@<server>  →  sudo -i  (direct root SSH blocked)"
-    _row "Monitoring"     "server_status  ·  pm2 monit  ·  Grafana :3001  ·  Loki :3100"
+    _row "Monitoring"     "Grafana :13001 [System + PM2 + Logs] · ClickHouse :17123"
 
     _sep
     printf "  ${PRP}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
@@ -2078,16 +3584,197 @@ print_summary() {
     local mon_steps=(
         "server_status                 quick overview of the whole server"
         "pm2 monit                     live Node.js process monitor (CPU/RAM)"
-        "pm2 logs                      tail live app logs"
-        "pm2 logs myapp --lines 200    last 200 lines for one app"
-        "Grafana dashboard (system metrics + PM2 + logs — all in one):"
-        "  ssh -L 3001:localhost:3001 ${USERNAME}@<server-ip>"
-        "  → http://localhost:3001  (admin/admin — change on first login)"
-        "  Dashboards: System → Node Exporter Full | Apps → PM2 Process Monitor"
-        "  Logs:       Explore → select Loki → query {job='pm2'} or {job='syslog'}"
+        ""
+        "🗄️  CENTRALIZED LOGGING VIA CLICKHOUSE (2-DAY RETENTION):"
+        "ch_pm2 [app]                  view PM2 logs from ClickHouse"
+        "ch_errors [app]               view error logs only"
+        "ch_system                     view system logs (syslog, auth, kern)"
+        "ch_nginx                      view Nginx access logs"
+        "ch_stats                      show log count & storage usage"
+        ""
+        "pm2 logs                      tail LIVE all app logs (local files)"
+        "plog_app <app-name>           view last 100 lines for ONE app only"
+        "plog_errors                   view recent errors from all apps"
     )
     for s in "${mon_steps[@]}"; do
+        [[ -z "$s" ]] && { printf "  ${PRP}${BOLD}║${R}\n"; continue; }
         printf "  ${PRP}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
+    done
+
+    _sep
+    _hdr "📊 GRAFANA DASHBOARDS (Professional Monitoring Platform)"
+    _sep
+    local graf_header=(
+        "🔗 Access:  ssh -L 13001:localhost:13001 \${USERNAME}@<server-ip>"
+        "           http://localhost:13001  (admin/admin on first login)"
+        ""
+        "┌─────────────────────────────────────────────────────────┐"
+        "│ 🖥️  SYSTEM FOLDER                                        │"
+        "├─────────────────────────────────────────────────────────┤"
+        "│ Status:     Infrastructure Monitoring & System Events    │"
+        "│ Dashboards:                                             │"
+        "│  1. System — Log Viewer                                 │"
+        "│     • System messages (syslog) - OS-level events       │"
+        "│     • Authentication logs - Security & access tracking │"
+        "│     • Kernel logs - Hardware & driver messages         │"
+        "│                                                         │"
+        "│  2. Node Exporter — System Metrics                      │"
+        "│     • CPU utilization & load average                  │"
+        "│     • Memory (RAM) usage & swap                        │"
+        "│     • Disk I/O & space utilization                     │"
+        "│     • Network traffic & connections                    │"
+        "└─────────────────────────────────────────────────────────┘"
+        ""
+        "┌─────────────────────────────────────────────────────────┐"
+        "│ ⚙️  APPLICATIONS FOLDER                                 │"
+        "├─────────────────────────────────────────────────────────┤"
+        "│ Status:     Node.js App Processes & Activity Logs       │"
+        "│ Dashboards:                                             │"
+        "│  1. PM2 — Process Monitor (Real-time)                  │"
+        "│     • App status - Online/offline state per app        │"
+        "│     • Resource usage - CPU & memory per app            │"
+        "│     • Reliability metrics - Uptime & restart counts    │"
+        "│     • Instance tracking - Replicas & scaling           │"
+        "│     • 10-second refresh rate - Live updates            │"
+        "│                                                         │"
+        "│  2. Applications — Log Viewer (Real-time)              │"
+        "│     • PM2 app output - Application stdout logs         │"
+        "│     • Nginx HTTPlogs - Web server access & errors      │"
+        "│     • 30-second refresh - Near real-time visibility   │"
+        "│                                                         │"
+        "│  3. Loki — Log Explorer (Query Interface)              │"
+        "│     • Free-form log searching - Find issues instantly  │"
+        "│     • Multiple data sources - PM2, Nginx, system       │"
+        "│     • Debugging aid - Trace request flows & errors     │"
+        "└─────────────────────────────────────────────────────────┘"
+        ""
+        "┌─────────────────────────────────────────────────────────┐"
+        "│ 📋 LOGS FOLDER (Real-time Analytics)                    │"
+        "├─────────────────────────────────────────────────────────┤"
+        "│ Status:     ClickHouse Log Analytics (2-day retention)  │"
+        "│ Dashboards:                                             │"
+        "│  1. Overview — Health Dashboard                        │"
+        "│     • Total logs KPI - Volume tracking                 │"
+        "│     • Error rate card - Success vs failure ratio       │"
+        "│     • Error trends - Time-series visualization         │"
+        "│     • Log distribution - By type & severity            │"
+        "│     • Top apps chart - Highest activity apps           │"
+        "│     • Health scores - Per-application scoring          │"
+        "│                                                         │"
+        "│  2. Error Analysis — Deep Dive Dashboard               │"
+        "│     • Error count & rate - Volume & velocity           │"
+        "│     • Error trend chart - Over time analysis            │"
+        "│     • Log levels - Distribution breakdown              │"
+        "│     • Apps with errors - Error density per app         │"
+        "│     • Error rate by app - Comparative view             │"
+        "│     • Recent errors table - Last 100 incidents         │"
+        "│                                                         │"
+        "│  3. App Health — Availability Dashboard                │"
+        "│     • Health scores - Computed per-app metric           │"
+        "│     • Log volume tracking - Activity levels             │"
+        "│     • Availability by app - Uptime percentage           │"
+        "│     • Activity patterns - Traffic & usage trends        │"
+        "│     • Recent issues - New problems summary              │"
+        "│                                                         │"
+        "│     Auto-refresh: 30 seconds                           │"
+        "│     Data retention: 2 days in ClickHouse               │"
+        "└─────────────────────────────────────────────────────────┘"
+    )
+    for s in "${graf_header[@]}"; do
+        [[ -z "$s" ]] && { printf "  ${PRP}${BOLD}║${R}\n"; continue; }
+        printf "  ${PRP}${BOLD}║${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
+    done
+
+    _sep
+    _hdr "🎯 Quick Dashboard Access Guide"
+    _sep
+    local quick_guide=(
+        "SELECT what to monitor:                                  "
+        ""
+        "👉 Real-time app monitoring?"
+        "   → Use 'PM2 — Process Monitor' (⚙️  Applications folder)"
+        "   • Shows live CPU, memory, status"
+        "   • 10-second updates"
+        ""
+        "👉 Find app errors or debug issues?"
+        "   → Use 'Loki — Log Explorer' (⚙️  Applications folder)"
+        "   • Search logs by app, keyword, or time"
+        "   • Drill into specific incidents"
+        ""
+        "👉 Analyze error patterns & trends?"
+        "   → Use 'Error Analysis' (📋 Logs folder)"
+        "   • See error rate over time"
+        "   • Identify problematic apps"
+        "   • Heatmaps & distribution charts"
+        ""
+        "👉 Check system health & resources?"
+        "   → Use 'System — Log Viewer' (🖥️  System folder)"
+        "   • OS events & kernel logs"
+        "   • Authentication activity"
+        ""
+        "👉 Get overview of everything?"
+        "   → Use 'Overview' (📋 Logs folder)"
+        "   • KPI cards with key metrics"
+        "   • Top apps & health scores"
+        "   • Dashboard at a glance"
+    )
+    for s in "${quick_guide[@]}"; do
+        [[ -z "$s" ]] && { printf "  ${PRP}${BOLD}║${R}\n"; continue; }
+        printf "  ${PRP}${BOLD}║${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
+    done
+
+    _sep
+    _hdr "ClickHouse Web UI (Advanced SQL Queries)"
+    _sep
+    cat <<'CHUI'
+  ║  Optional: Access ClickHouse directly for custom analysis
+  ║  
+  ║  ssh -L 17123:localhost:17123 ${USERNAME}@<server-ip>
+  ║  http://localhost:17123/play
+  ║  
+  ║  Built-in queries for:
+  ║   • Log count by app             • Error distribution
+  ║   • Log volume trends            • Recent 100 records per app
+CHUI
+
+    _sep
+    _hdr "🚀  PM2 App Configuration (Separate Logs per App)"
+    _sep
+    local pm2_config_steps=(
+        "1. Edit ecosystem config:  nano ~/.pm2/ecosystem.config.js"
+        "   (Copy from ~/.pm2/ecosystem.template.js and customize per app)"
+        ""
+        "2. Each app in ecosystem.config.js gets separate logging:"
+        "   ✓ output file  — app's stdout logs (auto-shipped to ClickHouse)"
+        "   ✓ error file   — app's stderr/errors only (auto-shipped)"
+        "   ✓ log_date_format — timestamps on every line"
+        ""
+        "3. Start apps from ecosystem config:"
+        "   pm2 start ecosystem.config.js"
+        ""
+        "4. View Logs (3 methods):"
+        "   CLI:      ch_pm2, ch_errors, ch_system, ch_stats"
+        "   LIVE:     pm2 logs, plog_app <app>, plog_errors"
+        "   DASHBOARD: Grafana :13001 → See above for each dashboard"
+        ""
+        "5. Log Analytics (Real-time Dashboards — Automatically Generated):"
+        "   📊 Logs — Overview          KPI metrics, error rate, success rate, trends"
+        "   ⚠️  Logs — Error Analysis    Error patterns, incidents, deep dive analysis"
+        "   💚 Logs — App Health         Health scores, availability, activity per app"
+        ""
+        "6. Automated Log Management:"
+        "   • Logs shipped to ClickHouse every 5 seconds"
+        "   • Local files auto-deleted after 30 min (saves disk)"
+        "   • ClickHouse 2-day TTL — auto-delete old analytics"
+        "   • Zero manual cleanup needed"
+        ""
+        "7. Log Lifecycle:"
+        "   Created → Local storage (30 min) → ClickHouse → Auto-delete"
+        "   Total retention: 2 days in ClickHouse (real-time analytics)"
+    )
+    for s in "${pm2_config_steps[@]}"; do
+        [[ -z "$s" ]] && { printf "  ${PRP}${BOLD}║${R}\n"; continue; }
+        printf "  ${PRP}${BOLD}║${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
     done
 
     _sep

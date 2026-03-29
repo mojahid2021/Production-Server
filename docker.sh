@@ -52,7 +52,7 @@ readonly PROMETHEUS_CONFIG="/etc/prometheus/prometheus.yml"   # written by init.
 readonly PROMETHEUS_URL="http://127.0.0.1:9090"               # bound by init.sh
 readonly GRAFANA_PROVISIONING="/etc/grafana/provisioning"     # init.sh standard path
 readonly GRAFANA_DASH_DIR="/var/lib/grafana/dashboards"       # init.sh dashboard dir
-readonly GRAFANA_URL="http://127.0.0.1:3001"                  # init.sh uses port 3001
+readonly GRAFANA_URL="http://127.0.0.1:13001"                 # init.sh configures port 13001
 
 # ── Docker monitoring stack ────────────────────────────────────────────────────
 readonly MONITORING_DIR="/opt/docker-monitoring"
@@ -849,16 +849,26 @@ provision_loki_datasource() {
     local DS_DIR="${GRAFANA_PROVISIONING}/datasources"
     mkdir -p "${DS_DIR}"
 
-    # If init.sh ≥ v7.0.0 already provisioned a Loki datasource at the same
-    # endpoint, skip to avoid duplicate "Loki" entries in Grafana.
+    # ── CONFLICT RESOLUTION ──────────────────────────────────────────────────
+    # Detect if init.sh already provisioned Loki datasource and reuse it
     if [[ -f "${DS_DIR}/loki.yaml" ]]; then
-        ok "Loki datasource already provisioned by init.sh — skipping."
-        info "Existing datasource: ${DS_DIR}/loki.yaml → http://127.0.0.1:${LOKI_PORT}"
+        ok "✓ Loki datasource already provisioned by init.sh — reusing."
+        info "  Datasource: ${DS_DIR}/loki.yaml → http://127.0.0.1:${LOKI_PORT}"
+        info "  Will not create duplicate loki-docker.yaml"
         section_end; return
     fi
 
+    # Detect if docker.sh already provisioned datasource (idempotent)
+    if [[ -f "${DS_DIR}/loki-docker.yaml" ]]; then
+        ok "✓ Loki datasource already provisioned by docker.sh — skipping."
+        info "  Datasource: ${DS_DIR}/loki-docker.yaml"
+        section_end; return
+    fi
+
+    # ── CREATE NEW DATASOURCE (first run) ────────────────────────────────────
     cat > "${DS_DIR}/loki-docker.yaml" <<EOF
 # Provisioned by docker.sh v${SCRIPT_VERSION}
+# NOTE: Uses same Loki endpoint as init.sh — no conflicts
 apiVersion: 1
 
 datasources:
@@ -880,8 +890,8 @@ datasources:
     editable: true
 EOF
     chown grafana:grafana "${DS_DIR}/loki-docker.yaml" 2>/dev/null || true
-    ok "Loki datasource written: ${DS_DIR}/loki-docker.yaml"
-    info "URL: http://127.0.0.1:${LOKI_PORT}  |  UID: Loki"
+    ok "✓ Loki datasource created: ${DS_DIR}/loki-docker.yaml"
+    info "  Endpoint: http://127.0.0.1:${LOKI_PORT}  |  UID: Loki"
 
     section_end
 }
@@ -899,9 +909,34 @@ provision_dashboards() {
     local PROV_DIR="${GRAFANA_PROVISIONING}/dashboards"
     mkdir -p "${DASH_DIR}" "${PROV_DIR}"
 
-    # ── Provision dashboard provider (appends to existing Docker folder) ───────
+    # ── CONFLICT RESOLUTION ──────────────────────────────────────────────────
+    # Verify that init.sh created its dashboard providers first
+    local init_providers=0
+    [[ -f "${PROV_DIR}/system.yaml" ]] && ((init_providers++))
+    [[ -f "${PROV_DIR}/applications.yaml" ]] && ((init_providers++))
+    [[ -f "${PROV_DIR}/logs.yaml" ]] && ((init_providers++))
+    
+    if (( init_providers == 0 )); then
+        warn "No dashboard providers found from init.sh (system.yaml, applications.yaml, logs.yaml)"
+        warn "docker.sh assumes init.sh has been run first"
+        warn "This is not necessarily an error, but verify init.sh provisioning manually"
+    else
+        ok "✓ Found ${init_providers} dashboard provider(s) from init.sh — will not override"
+    fi
+
+    # Detect if docker.sh already provisioned its dashboard provider (idempotent)
+    if [[ -f "${PROV_DIR}/docker-dashboards.yaml" ]]; then
+        ok "✓ Docker dashboard provider already configured — skipping."
+        info "  Provider: ${PROV_DIR}/docker-dashboards.yaml"
+        # Still recreate dashboards in case they were deleted
+    else
+        ok "✓ Creating new Docker dashboard provider"
+    fi
+
+    # ── Provision dashboard provider (appends to existing other folders) ───────
     cat > "${PROV_DIR}/docker-dashboards.yaml" <<EOF
 # Provisioned by docker.sh v${SCRIPT_VERSION}
+# Coexists with init.sh providers: system.yaml, applications.yaml, logs.yaml
 apiVersion: 1
 
 providers:
@@ -917,34 +952,255 @@ providers:
       path: ${DASH_DIR}
 EOF
     chown grafana:grafana "${PROV_DIR}/docker-dashboards.yaml" 2>/dev/null || true
-    ok "Dashboard provider config: ${PROV_DIR}/docker-dashboards.yaml"
+    ok "✓ Docker dashboard provider: ${PROV_DIR}/docker-dashboards.yaml"
 
-    # ── Download pre-built dashboards from grafana.com ─────────────────────────
-    _download_dash() {
-        local id="$1" name="$2" desc="$3"
-        local dest="${DASH_DIR}/${name}.json"
-        local url="https://grafana.com/api/dashboards/${id}/revisions/latest/download"
-        if curl -sf "${url}" -o "${dest}" 2>/dev/null; then
-            # Fix datasource placeholder to match init.sh-provisioned name
-            sed -i 's/"\${DS_PROMETHEUS}"/"Prometheus"/g'   "${dest}" 2>/dev/null || true
-            sed -i 's/"\${DS_LOKI}"/"Loki"/g'               "${dest}" 2>/dev/null || true
-            sed -i 's/\${DS_PROMETHEUS}/Prometheus/g'        "${dest}" 2>/dev/null || true
-            chown grafana:grafana "${dest}" 2>/dev/null || true
-            ok "Dashboard: ${desc} (ID: ${id})"
-        else
-            warn "Could not download '${desc}' — import manually: Grafana → Import → ID ${id}"
-        fi
-    }
+    # ── 1. Template: Container Metrics & Status ──────────────────────────────
+    cat > "${DASH_DIR}/01-template-container-metrics.json" <<'TEMPLATE_METRICS'
+{
+  "dashboard": {
+    "title": "📊 Template — Container Metrics & Status",
+    "description": "Use as template: duplicate & set container_name for per-container monitoring",
+    "timezone": "browser",
+    "templating": {
+      "list": [
+        {
+          "name": "container_name",
+          "type": "textbox",
+          "label": "Container Name",
+          "description": "Set to your Docker container name (e.g., db, cache, web)"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "title": "Container Status",
+        "description": "Is this container running?",
+        "targets": [{"expr": "container_last_seen{name=~\\\".*\\$\\${container_name}.*\\\"}"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "CPU Usage (%)",
+        "targets": [{"expr": "rate(container_cpu_usage_seconds_total{name=~\\\".*\\$\\${container_name}.*\\\"}[1m]) * 100"}],
+        "type": "timeseries",
+        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Memory Usage (MB)",
+        "targets": [{"expr": "container_memory_usage_bytes{name=~\\\".*\\$\\${container_name}.*\\\"} / 1024 / 1024"}],
+        "type": "timeseries",
+        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Memory Limit (MB)",
+        "targets": [{"expr": "container_spec_memory_limit_bytes{name=~\\\".*\\$\\${container_name}.*\\\"} / 1024 / 1024"}],
+        "type": "stat",
+        "gridPos": {"x": 18, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Memory % of Limit",
+        "description": "Memory utilization percentage",
+        "targets": [{"expr": "(container_memory_usage_bytes{name=~\\\".*\\$\\${container_name}.*\\\"} / container_spec_memory_limit_bytes{name=~\\\".*\\$\\${container_name}.*\\\"}) * 100"}],
+        "type": "gauge",
+        "gridPos": {"x": 0, "y": 3, "w": 6, "h": 3},
+        "fieldConfig": {"defaults": {"unit": "percent", "max": 100, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 70}, {"color": "red", "value": 90}]}}}
+      },
+      {
+        "title": "CPU Quota",
+        "targets": [{"expr": "container_spec_cpu_quota{name=~\\\".*\\$\\${container_name}.*\\\"} / 100000"}],
+        "type": "stat",
+        "gridPos": {"x": 6, "y": 3, "w": 6, "h": 3}
+      },
+      {
+        "title": "Restart Count",
+        "description": "Times this container has restarted",
+        "targets": [{"expr": "container_oom_events_total{name=~\\\".*\\$\\${container_name}.*\\\"}"}],
+        "type": "stat",
+        "gridPos": {"x": 12, "y": 3, "w": 6, "h": 3}
+      },
+      {
+        "title": "Uptime",
+        "description": "How long container has been running",
+        "targets": [{"expr": "time() - container_start_time_seconds{name=~\\\".*\\$\\${container_name}.*\\\"}"}],
+        "type": "stat",
+        "gridPos": {"x": 18, "y": 3, "w": 6, "h": 3},
+        "fieldConfig": {"defaults": {"unit": "s"}}
+      },
+      {
+        "title": "CPU Usage Trend",
+        "targets": [{"expr": "rate(container_cpu_usage_seconds_total{name=~\\\".*\\$\\${container_name}.*\\\"}[5m]) * 100"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8}
+      },
+      {
+        "title": "Memory Usage Trend",
+        "targets": [{"expr": "container_memory_usage_bytes{name=~\\\".*\\$\\${container_name}.*\\\"} / 1024 / 1024"}],
+        "type": "timeseries",
+        "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8}
+      }
+    ],
+    "refresh": "30s",
+    "time": {"from": "now-6h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+TEMPLATE_METRICS
 
-    info "Downloading Docker dashboards from grafana.com..."
-    _download_dash 14282  "cadvisor-exporter"           "cAdvisor Exporter — container CPU/RAM/net"
-    _download_dash 893    "docker-and-system"            "Docker + System Monitoring overview"
-    _download_dash 10619  "docker-host"                  "Docker Host — host resources from cAdvisor"
-    _download_dash 15120  "docker-container-overview"    "Docker Container Overview — running table"
-    _download_dash 12611  "loki-docker-logs"             "Loki Docker Logs — log explorer + errors"
+    # ── 2. Template: Container Logs ──────────────────────────────────────────
+    cat > "${DASH_DIR}/02-template-container-logs.json" <<'TEMPLATE_LOGS'
+{
+  "dashboard": {
+    "title": "📋 Template — Container Logs",
+    "description": "Use as template: duplicate & set container_name for per-container logs",
+    "timezone": "browser",
+    "templating": {
+      "list": [
+        {
+          "name": "container_name",
+          "type": "textbox",
+          "label": "Container Name",
+          "description": "Set to your Docker container name"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "title": "Total Logs (24h)",
+        "targets": [{"expr": "count by (container_name) ({container_name=\\\"\\$\\${container_name}\\\"})"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Error Logs (24h)",
+        "targets": [{"expr": "count by (container_name) ({container_name=\\\"\\$\\${container_name}\\\" | \\\"error\\\"|\\\"ERROR\\\"|\\\"Exception\\\"})"}],
+        "type": "stat",
+        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+      },
+      {
+        "title": "Warning Logs (24h)",
+        "targets": [{"expr": "count by (container_name) ({container_name=\\\"\\$\\${container_name}\\\" | \\\"WARN\\\"|\\\"warn\\\"})"}],
+        "type": "stat",
+        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Last Log Entry",
+        "description": "Timestamp of last log",
+        "targets": [{"expr": "max by (container_name) ({container_name=\\\"\\$\\${container_name}\\\"})"}],
+        "type": "stat",
+        "gridPos": {"x": 18, "y": 0, "w": 6, "h": 3}
+      },
+      {
+        "title": "Log Volume Trend",
+        "description": "Logs over time for this container",
+        "targets": [{"expr": "count by (container_name) ({container_name=\\\"\\$\\${container_name}\\\"})"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 3, "w": 12, "h": 8}
+      },
+      {
+        "title": "Error Rate",
+        "targets": [{"expr": "count by (container_name) ({container_name=\\\"\\$\\${container_name}\\\" | \\\"error\\\"|\\\"ERROR\\\"})"}],
+        "type": "timeseries",
+        "gridPos": {"x": 12, "y": 3, "w": 12, "h": 8}
+      },
+      {
+        "title": "Recent Logs",
+        "description": "Latest 100 log lines from this container",
+        "targets": [{"expr": "{container_name=\\\"\\$\\${container_name}\\\"}"}],
+        "type": "logs",
+        "gridPos": {"x": 0, "y": 11, "w": 24, "h": 15}
+      }
+    ],
+    "refresh": "10s",
+    "time": {"from": "now-1h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+TEMPLATE_LOGS
+
+    # ── 3. Template: Container Network & Disk I/O ────────────────────────────
+    cat > "${DASH_DIR}/03-template-container-io.json" <<'TEMPLATE_IO'
+{
+  "dashboard": {
+    "title": "🔄 Template — Container Network & Disk I/O",
+    "description": "Use as template: duplicate & set container_name for network/disk monitoring",
+    "timezone": "browser",
+    "templating": {
+      "list": [
+        {
+          "name": "container_name",
+          "type": "textbox",
+          "label": "Container Name",
+          "description": "Set to your Docker container name"
+        }
+      ]
+    },
+    "panels": [
+      {
+        "title": "Network Received (MB/s)",
+        "targets": [{"expr": "rate(container_network_receive_bytes_total{name=~\\\".*\\$\\${container_name}.*\\\"}[1m]) / 1024 / 1024"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 0, "w": 12, "h": 8}
+      },
+      {
+        "title": "Network Transmitted (MB/s)",
+        "targets": [{"expr": "rate(container_network_transmit_bytes_total{name=~\\\".*\\$\\${container_name}.*\\\"}[1m]) / 1024 / 1024"}],
+        "type": "timeseries",
+        "gridPos": {"x": 12, "y": 0, "w": 12, "h": 8}
+      },
+      {
+        "title": "Disk Reads (MB/s)",
+        "targets": [{"expr": "rate(container_fs_reads_bytes_total{name=~\\\".*\\$\\${container_name}.*\\\"}[1m]) / 1024 / 1024"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 8, "w": 12, "h": 8}
+      },
+      {
+        "title": "Disk Writes (MB/s)",
+        "targets": [{"expr": "rate(container_fs_writes_bytes_total{name=~\\\".*\\$\\${container_name}.*\\\"}[1m]) / 1024 / 1024"}],
+        "type": "timeseries",
+        "gridPos": {"x": 12, "y": 8, "w": 12, "h": 8}
+      },
+      {
+        "title": "Network Packets In/Out",
+        "targets": [{"expr": "rate(container_network_receive_packets_total{name=~\\\".*\\$\\${container_name}.*\\\"}[1m])"}],
+        "type": "timeseries",
+        "gridPos": {"x": 0, "y": 16, "w": 12, "h": 8}
+      },
+      {
+        "title": "Network Errors",
+        "targets": [{"expr": "rate(container_network_receive_errors_total{name=~\\\".*\\$\\${container_name}.*\\\"}[1m])"}],
+        "type": "stat",
+        "gridPos": {"x": 12, "y": 16, "w": 12, "h": 8},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+      }
+    ],
+    "refresh": "30s",
+    "time": {"from": "now-6h", "to": "now"},
+    "schemaVersion": 38,
+    "style": "dark",
+    "version": 1
+  }
+}
+TEMPLATE_IO
 
     chown -R grafana:grafana "${DASH_DIR}" 2>/dev/null || true
-    ok "Dashboards saved to: ${DASH_DIR}"
+    chmod 644 "${DASH_DIR}"/*.json 2>/dev/null || true
+    
+    ok "✓ Dashboard template: Container Metrics & Status"
+    ok "✓ Dashboard template: Container Logs"
+    ok "✓ Dashboard template: Container Network & Disk I/O"
+    ok "Saved to: ${DASH_DIR}"
+    ok ""
+    ok "📌 HOW TO CREATE PER-CONTAINER DASHBOARDS:"
+    ok "   1. Duplicate any template dashboard (e.g., 01-template-container-metrics.json)"
+    ok "   2. Open the duplicate in Grafana"
+    ok "   3. Edit template variable 'container_name' and set to your container name"
+    ok "   4. Save with your container name as dashboard title"
+    ok "   5. Queries auto-filter to show only that container's data"
 
     section_end
 }
