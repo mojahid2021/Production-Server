@@ -2373,9 +2373,13 @@ PTSVC
     
     if ! command -v clickhouse-client &>/dev/null; then
         # Add ClickHouse repository
-        apt-get install -y apt-transport-https ca-certificates dirmngr gnupg 2>&1 | tail -2 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-        echo "deb https://packages.clickhouse.com/deb stable main" | tee /etc/apt/sources.list.d/clickhouse.list 2>/dev/null || true
-        apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv E0C9851CC6E98FB3 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        apt-get install -y apt-transport-https ca-certificates curl gnupg 2>&1 | tail -2 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        # Download signing key using the modern signed-by method (replaces deprecated apt-key).
+        # ClickHouse uses one universal GPG key for both DEB and RPM packages.
+        curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
+            | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" \
+            | tee /etc/apt/sources.list.d/clickhouse.list 2>/dev/null || true
         apt-get update -qq 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         apt-get install -y clickhouse-server clickhouse-client 2>&1 | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         ok "ClickHouse installed."
@@ -2427,7 +2431,7 @@ CHCFG
     # Create PM2 logs table with 2-day TTL
     if ! clickhouse-client --query "SHOW TABLES FROM pm2_logs" 2>/dev/null | grep -q "logs"; then
         info "Creating ClickHouse unified log schema (PM2 + System + Nginx → ClickHouse)..."
-        clickhouse-client <<'CHSQL' 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        clickhouse-client --multiquery <<'CHSQL' 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
 CREATE DATABASE IF NOT EXISTS pm2_logs;
 
 -- Main unified logs table (all types: PM2, system, nginx)
