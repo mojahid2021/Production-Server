@@ -468,12 +468,17 @@ deploy_cadvisor() {
         -v /dev/disk/:/dev/disk:ro \
         -v /etc/machine-id:/etc/machine-id:ro \
         --device /dev/kmsg \
+        --health-cmd='curl -sf http://127.0.0.1:8080/healthz || exit 1' \
+        --health-interval=15s \
+        --health-timeout=5s \
+        --health-retries=3 \
+        --health-start-period=20s \
         gcr.io/cadvisor/cadvisor:latest \
         --housekeeping_interval=10s \
         --docker_only=true \
         --store_container_labels=true \
         --disable_metrics=disk,tcp,udp,percpu,sched,process \
-        > /dev/null
+        > /dev/null 2>&1 || die "Failed to start cAdvisor container"
 
     sleep 5
     if docker ps --filter "name=cadvisor" --filter "status=running" | grep -q cadvisor; then
@@ -651,9 +656,14 @@ PTCFG
             -p "127.0.0.1:${LOKI_PORT}:3100" \
             -v "${MONITORING_DIR}/loki/loki-config.yml:/etc/loki/local-config.yaml:ro" \
             -v "${MONITORING_DIR}/data/loki:/loki" \
+            --health-cmd='curl -sf http://127.0.0.1:3100/ready || exit 1' \
+            --health-interval=10s \
+            --health-timeout=5s \
+            --health-retries=3 \
+            --health-start-period=30s \
             grafana/loki:latest \
             -config.file=/etc/loki/local-config.yaml \
-            > /dev/null
+            > /dev/null 2>&1 || die "Failed to start Loki container"
 
         # ── Wait for Loki ready ────────────────────────────────────────────────────
         info "Waiting for Loki to become ready..."
@@ -688,9 +698,14 @@ PTCFG
             -v /var/log:/var/log:ro \
             -v /run/log/journal:/run/log/journal:ro \
             -v /etc/machine-id:/etc/machine-id:ro \
+            --health-cmd='curl -sf http://127.0.0.1:9081/loki/api/v1/tail || exit 1' \
+            --health-interval=15s \
+            --health-timeout=5s \
+            --health-retries=3 \
+            --health-start-period=15s \
             grafana/promtail:latest \
             -config.file=/etc/promtail/config.yml \
-            > /dev/null
+            > /dev/null 2>&1 || die "Failed to start Promtail-docker container"
     else
         docker run -d \
             --name promtail \
@@ -703,9 +718,14 @@ PTCFG
             -v /var/log:/var/log:ro \
             -v /run/log/journal:/run/log/journal:ro \
             -v /etc/machine-id:/etc/machine-id:ro \
+            --health-cmd='curl -sf http://127.0.0.1:9080/loki/api/v1/tail || exit 1' \
+            --health-interval=15s \
+            --health-timeout=5s \
+            --health-retries=3 \
+            --health-start-period=15s \
             grafana/promtail:latest \
             -config.file=/etc/promtail/config.yml \
-            > /dev/null
+            > /dev/null 2>&1 || die "Failed to start Promtail container"
     fi
 
     local promtail_name; $NATIVE_LOKI && promtail_name="promtail-docker" || promtail_name="promtail"

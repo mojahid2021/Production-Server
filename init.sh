@@ -60,6 +60,9 @@ readonly STATUS_SCRIPT="/usr/local/bin/server_status"
 # Prompt behaviour: when true the script will ask for these passwords up-front.
 readonly REQUIRE_USER_PW=true
 readonly REQUIRE_ROOT_PW=true
+OPEN_NGINX_PORTS=false
+OPEN_EMAIL_PORTS=false
+CUSTOM_PORTS=""
 USER_PW=""    # captured (hidden) deploy-user password for informational/confirmation use
 ROOT_PW=""    # captured (hidden) root password for informational/confirmation use
 
@@ -325,6 +328,36 @@ prompt_inputs() {
     _step_end
 
     # ══════════════════════════════════════════════════════════════════════════
+    # STEP 4 — Additional Firewall Ports
+    # ══════════════════════════════════════════════════════════════════════════
+    _step 4 4 "Additional Firewall Ports"
+    _hint "By default, only SSH port is open. Choose additional services to allow."
+    _hint "Options: nginx (80/443), email (SMTP/IMAP/POP3), custom ports, or combinations."
+    _hint "Examples: 'nginx', 'email', 'custom', 'both', 'all', or press Enter for SSH only."
+    echo -e "  ${PRP}${BOLD}│${R}"
+    _prompt && get_input && _ports_input="$REPLY"
+    case "${_ports_input,,}" in
+        nginx|n) OPEN_NGINX_PORTS=true; _ok "Nginx ports (80/443) will be opened." ;;
+        email|e) OPEN_EMAIL_PORTS=true; _ok "Email ports (25,465,587,143,993,110,995) will be opened." ;;
+        custom|c) 
+            printf "  ${PRP}${BOLD}│${R}  ${CYN}${BOLD}❯${R}  ${WHT}Custom ports${R}  ${GRY}(comma-separated, e.g., 3000/tcp,8080/udp):${R}  "
+            get_input && CUSTOM_PORTS="$REPLY"
+            if [[ -n "$CUSTOM_PORTS" ]]; then
+                _ok "Custom ports will be opened: $CUSTOM_PORTS"
+            else
+                _warn "No custom ports specified."
+            fi
+            ;;
+        both|b) OPEN_NGINX_PORTS=true; OPEN_EMAIL_PORTS=true; _ok "Nginx and Email ports will be opened." ;;
+        all|a) OPEN_NGINX_PORTS=true; OPEN_EMAIL_PORTS=true; 
+            printf "  ${PRP}${BOLD}│${R}  ${CYN}${BOLD}❯${R}  ${WHT}Additional custom ports${R}  ${GRY}(optional, comma-separated):${R}  "
+            get_input && CUSTOM_PORTS="$REPLY"
+            _ok "All standard ports + custom will be opened." ;;
+        *) _ok "No additional ports — only SSH will be open." ;;
+    esac
+    _step_end
+
+    # ══════════════════════════════════════════════════════════════════════════
     # CONFIRMATION SUMMARY
     # ══════════════════════════════════════════════════════════════════════════
     echo ""
@@ -341,6 +374,7 @@ prompt_inputs() {
     _conf_row "NVM"         "$(  $INSTALL_NVM && echo "✔ install" || echo "– skip (--no-nvm)")"
     _conf_row "PM2"         "$(  $INSTALL_PM2 && echo "✔ install" || echo "– skip (--no-pm2)")"
     _conf_row "UFW"         "$(  $GEN_FW      && echo "✔ configure" || echo "– skip (--no-fw)")"
+    _conf_row "Firewall"    "SSH + $( [[ "$OPEN_NGINX_PORTS" == true ]] && echo "Nginx " ; [[ "$OPEN_EMAIL_PORTS" == true ]] && echo "Email " ; [[ -n "$CUSTOM_PORTS" ]] && echo "Custom " ; echo "")"
     _conf_row "Monitoring"  "$( $SETUP_MON   && echo "✔ Grafana · Prometheus · Loki · Promtail · PM2 exporter" || echo "– skip (--no-mon)")"
     echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
@@ -782,29 +816,54 @@ NESERVICE
     chown prometheus:prometheus /etc/prometheus /var/lib/prometheus
 
     if [[ ! -f /etc/prometheus/prometheus.yml ]]; then
-        cat > /etc/prometheus/prometheus.yml <<'PROMCFG'
+        cat > /etc/prometheus/prometheus.yml <<PROMCFG
 global:
   scrape_interval:     15s
   evaluation_interval: 15s
+  external_labels:
+    environment: 'production'
+    job_origin: 'init.sh'
+
+alerting:
+  alertmanagers: []
 
 scrape_configs:
   - job_name: 'node'
     static_configs:
       - targets: ['127.0.0.1:9100']
+    scrape_interval: 30s
+    scrape_timeout: 10s
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'go_.*'
+        action: drop
 
   - job_name: 'pm2'
     scrape_interval: 10s
+    scrape_timeout: 5s
     static_configs:
       - targets: ['127.0.0.1:9209']
         labels:
           instance: pm2_apps
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'process_.*|go_.*'
+        action: drop
 PROMCFG
+        # Validate config with promtool if available
+        if command -v promtool &>/dev/null; then
+            if promtool check config /etc/prometheus/prometheus.yml &>/dev/null; then
+                ok "Prometheus config validated."
+            else
+                warn "Prometheus config validation failed — check /etc/prometheus/prometheus.yml"
+            fi
+        fi
         chown prometheus:prometheus /etc/prometheus/prometheus.yml
         ok "Prometheus config written to /etc/prometheus/prometheus.yml."
     else
         # Patch existing config to add PM2 exporter job if not present
         if ! grep -q "job_name: 'pm2'" /etc/prometheus/prometheus.yml 2>/dev/null; then
-            cat >> /etc/prometheus/prometheus.yml <<'PROMPM2'
+            cat >> /etc/prometheus/prometheus.yml <<PROMPM2
 
   - job_name: 'pm2'
     scrape_interval: 10s
@@ -823,7 +882,8 @@ PROMPM2
         cat > /etc/systemd/system/prometheus.service <<'PROMSVC'
 [Unit]
 Description=Prometheus Monitoring
-After=network.target
+After=network-online.target node-exporter.service
+Wants=network-online.target
 
 [Service]
 User=prometheus
@@ -838,13 +898,18 @@ ExecStart=/usr/local/bin/prometheus \
     --web.console.libraries=/etc/prometheus/console_libraries \
     --storage.tsdb.retention.time=15d
 Restart=always
-RestartSec=5
+RestartSec=10
+StartLimitInterval=60s
+StartLimitBurst=3
+HealthCheck=/bin/bash -c 'curl -sf http://127.0.0.1:9090/-/healthy || exit 1'
 
 [Install]
 WantedBy=multi-user.target
 PROMSVC
         systemctl daemon-reload
+        systemctl enable node-exporter 2>/dev/null || true
         systemctl enable --now prometheus 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        sleep 3  # Wait for Prometheus to be ready
         ok "Prometheus service enabled (127.0.0.1:9090)."
     else
         ok "Prometheus service already configured."
@@ -970,7 +1035,7 @@ GFDB
     fi
 
     # Provision PM2 Process Monitor dashboard — always write so metric name fixes are applied
-    cat > "${dash_dir}/pm2_apps.json" <<'PM2DASH'
+    cat > "${dash_dir}/pm2_apps.json" <<PM2DASH
 {
   "annotations": { "list": [] },
   "editable": true,
@@ -1129,7 +1194,7 @@ PM2DASH
     ok "Grafana: PM2 Process Monitor dashboard provisioned."
 
     # Provision Loki Log Explorer dashboard — always write so it stays current
-    cat > "${dash_dir}/loki_logs.json" <<'LOGDASH'
+    cat > "${dash_dir}/loki_logs.json" <<LOGDASH
 {
   "annotations": { "list": [] },
   "editable": true,
@@ -1302,13 +1367,15 @@ LOGDASH
     chown loki:loki /var/lib/loki
 
     if [[ ! -f /etc/loki/loki.yml ]]; then
-        cat > /etc/loki/loki.yml <<'LOKICFG'
+        cat > /etc/loki/loki.yml <<LOKICFG
 auth_enabled: false
 
 server:
   http_listen_port: 3100
   grpc_listen_port: 9096
   log_level: warn
+  log_format: json
+  graceful_shutdown_timeout: 30s
 
 common:
   instance_addr: 127.0.0.1
@@ -1341,13 +1408,16 @@ schema_config:
 
 limits_config:
   retention_period: 744h  # 31 days (744 = 31 × 24 hours)
-  ingestion_rate_mb: 16
-  ingestion_burst_size_mb: 32
+  ingestion_rate_mb: 32
+  ingestion_burst_size_mb: 64
+  max_cache_freshness_per_query: 10m
+  split_queries_by_interval: 24h
 
 compactor:
   working_directory: /var/lib/loki/compactor
   retention_enabled: true
   delete_request_store: filesystem
+  shared_store: filesystem
 
 analytics:
   reporting_enabled: false
@@ -1362,7 +1432,8 @@ LOKICFG
         cat > /etc/systemd/system/loki.service <<'LOKISVC'
 [Unit]
 Description=Loki Log Aggregation Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 User=loki
@@ -1370,14 +1441,18 @@ Group=loki
 Type=simple
 ExecStart=/usr/local/bin/loki -config.file=/etc/loki/loki.yml
 Restart=always
-RestartSec=5
+RestartSec=10
+StartLimitInterval=60s
+StartLimitBurst=3
 LimitNOFILE=65536
+HealthCheck=/bin/bash -c 'curl -sf http://127.0.0.1:3100/ready || exit 1'
 
 [Install]
 WantedBy=multi-user.target
 LOKISVC
         systemctl daemon-reload
         systemctl enable --now loki 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        sleep 3  # Wait for Loki to be ready
         ok "Loki service enabled (127.0.0.1:3100)."
     else
         ok "Loki service already configured."
@@ -1425,19 +1500,39 @@ LOKISVC
     mkdir -p /etc/promtail /var/lib/promtail
     chown promtail:promtail /var/lib/promtail
 
+    # Set up ACL permissions for Promtail BEFORE creating config
+    info "Setting up Promtail permissions for log access..."
+    if ! command -v setfacl &>/dev/null; then
+        apt-get install -y acl 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+    fi
+    if command -v setfacl &>/dev/null; then
+        setfacl -m "u:promtail:rx" "/home/${USERNAME}" 2>/dev/null || true
+        setfacl -m "u:promtail:rx" "/home/${USERNAME}/.pm2" 2>/dev/null || true
+        setfacl -R -m "u:promtail:rX" "${pm2_log_dir}" 2>/dev/null || true
+        setfacl -m "u:promtail:rx" -m "d:u:promtail:rx" "${pm2_log_dir}" 2>/dev/null || true
+        ok "ACL permissions set for Promtail."
+    else
+        warn "setfacl not available — Promtail may have limited log access"
+    fi
+
     local pm2_log_dir="/home/${USERNAME}/.pm2/logs"
+    local hostname_val="$(hostname 2>/dev/null || echo 'server')"
     if [[ ! -f /etc/promtail/promtail.yml ]]; then
         cat > /etc/promtail/promtail.yml <<PTCFG
 server:
   http_listen_port: 9080
   grpc_listen_port: 0
   log_level: warn
+  compression: gzip
 
 positions:
   filename: /var/lib/promtail/positions.yaml
 
 clients:
   - url: http://127.0.0.1:3100/loki/api/v1/push
+    max_retries: 3
+    min_backoff: 100ms
+    max_backoff: 10s
 
 scrape_configs:
 
@@ -1446,8 +1541,8 @@ scrape_configs:
     static_configs:
       - targets: [localhost]
         labels:
-          job:    syslog
-          host:   $(hostname)
+          job: syslog
+          host: ${hostname_val}
           __path__: /var/log/syslog
     pipeline_stages:
       - match:
@@ -1456,15 +1551,15 @@ scrape_configs:
             - regex:
                 expression: '^(?P<timestamp>\S+\s+\S+\s+\S+)\s+(?P<host>\S+)\s+(?P<process>[^:\[]+)[^\:]*:\s*(?P<message>.*)$'
             - labels:
-                process:
+                process: process
 
   # ── Auth log ─────────────────────────────────────────────────────────────────
   - job_name: auth
     static_configs:
       - targets: [localhost]
         labels:
-          job:      auth
-          host:     $(hostname)
+          job: auth
+          host: ${hostname_val}
           __path__: /var/log/auth.log
 
   # ── Kernel log ───────────────────────────────────────────────────────────────
@@ -1472,8 +1567,8 @@ scrape_configs:
     static_configs:
       - targets: [localhost]
         labels:
-          job:      kern
-          host:     $(hostname)
+          job: kern
+          host: ${hostname_val}
           __path__: /var/log/kern.log
 
   # ── PM2 app logs ─────────────────────────────────────────────────────────────
@@ -1481,8 +1576,8 @@ scrape_configs:
     static_configs:
       - targets: [localhost]
         labels:
-          job:      pm2
-          host:     $(hostname)
+          job: pm2
+          host: ${hostname_val}
           __path__: ${pm2_log_dir}/*.log
     pipeline_stages:
       - match:
@@ -1491,44 +1586,17 @@ scrape_configs:
             - regex:
                 expression: '^(?P<timestamp>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:\d{2})?)\s+(?P<level>\S+)\s+(?P<message>.*)$'
             - labels:
-                level:
+                level: level
 
   # ── Nginx access + error logs ─────────────────────────────────────────────
   - job_name: nginx
     static_configs:
       - targets: [localhost]
         labels:
-          job:      nginx
-          host:     $(hostname)
+          job: nginx
+          host: ${hostname_val}
           __path__: /var/log/nginx/*.log
-    pipeline_stages:
-      - match:
-          selector: '{job="nginx", filename=~".*/access.log"}'
-          stages:
-            - regex:
-                expression: '^(?P<remote_addr>\S+)\s+-\s+(?P<remote_user>\S+)\s+\[(?P<time_local>[^\]]+)\]\s+"(?P<method>\S+)\s+(?P<path>\S+)\s+\S+"\s+(?P<status>\d+)\s+(?P<body_bytes>\d+)'
-            - labels:
-                method:
-                status:
 PTCFG
-        # Allow promtail to read PM2 log directory (requires ACL support on the filesystem)
-        if ! command -v setfacl &>/dev/null; then
-            info "Installing 'acl' package to enable Promtail access to PM2 log dir..."
-            apt-get install -y acl 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-        fi
-        if command -v setfacl &>/dev/null; then
-            setfacl -m "u:promtail:rx" "/home/${USERNAME}" 2>/dev/null \
-                || warn "setfacl failed for /home/${USERNAME} — Promtail may not read PM2 logs."
-            setfacl -m "u:promtail:rx" "/home/${USERNAME}/.pm2" 2>/dev/null \
-                || warn "setfacl failed for /home/${USERNAME}/.pm2 — Promtail may not read PM2 logs."
-            # Set both access ACL on existing files and default ACL so new log files are readable
-            setfacl -R -m "u:promtail:rX" "${pm2_log_dir}" 2>/dev/null \
-                || warn "setfacl failed for ${pm2_log_dir} files — Promtail may not read PM2 logs."
-            setfacl -m "u:promtail:rx" -m "d:u:promtail:rx" "${pm2_log_dir}" 2>/dev/null \
-                || warn "setfacl default ACL failed for ${pm2_log_dir} — new log files may not be readable by Promtail."
-        else
-            warn "setfacl still not available after installing 'acl' — Promtail may not read PM2 logs."
-        fi
         chown promtail:promtail /etc/promtail/promtail.yml
         ok "Promtail config written to /etc/promtail/promtail.yml."
         info "Collecting: syslog, auth.log, kern.log, PM2 app logs."
@@ -1540,22 +1608,28 @@ PTCFG
         cat > /etc/systemd/system/promtail.service <<'PTSVC'
 [Unit]
 Description=Promtail Log Collection Agent
-After=network.target loki.service
+After=network-online.target loki.service
+Wants=network-online.target loki.service
 
 [Service]
 User=promtail
 Group=promtail
 Type=simple
 ExecStart=/usr/local/bin/promtail -config.file=/etc/promtail/promtail.yml
+ExecReload=/bin/kill -SIGHUP $MAINPID
 Restart=always
-RestartSec=5
+RestartSec=10
+StartLimitInterval=60s
+StartLimitBurst=3
 LimitNOFILE=65536
+HealthCheck=/bin/bash -c 'curl -sf http://127.0.0.1:9080/loki/api/v1/tail || exit 1'
 
 [Install]
 WantedBy=multi-user.target
 PTSVC
         systemctl daemon-reload
         systemctl enable --now promtail 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        sleep 2  # Wait for Promtail to be ready
         ok "Promtail service enabled — collecting system logs + PM2 app logs."
     else
         ok "Promtail service already configured."
@@ -1563,7 +1637,68 @@ PTSVC
 
     # Restart Grafana to pick up the new Loki datasource and PM2 dashboard
     systemctl restart grafana-server 2>/dev/null || true
+    sleep 2
+    
+    # Restart Prometheus to reload config
+    systemctl restart prometheus 2>/dev/null || true
+    sleep 3
+    
     ok "Grafana restarted — Loki datasource + PM2 dashboard now active."
+
+    # ── H. Health Check — Verify all monitoring components are responding ──────
+    info "Performing monitoring stack health checks..."
+    local checks_passed=0
+    local checks_total=6
+    
+    # Check node_exporter
+    if curl -sf --max-time 3 "http://127.0.0.1:9100/metrics" &>/dev/null; then
+        ok "✓ node_exporter responding (127.0.0.1:9100)"
+        (( checks_passed++ ))
+    else
+        warn "✗ node_exporter not responding — restart with: systemctl restart node_exporter"
+    fi
+    
+    # Check Prometheus
+    if curl -sf --max-time 3 "http://127.0.0.1:9090/-/healthy" &>/dev/null; then
+        ok "✓ Prometheus responding (127.0.0.1:9090)"
+        (( checks_passed++ ))
+    else
+        warn "✗ Prometheus not responding — restart with: systemctl restart prometheus"
+    fi
+    
+    # Check Loki
+    if curl -sf --max-time 3 "http://127.0.0.1:3100/ready" &>/dev/null; then
+        ok "✓ Loki responding (127.0.0.1:3100)"
+        (( checks_passed++ ))
+    else
+        warn "✗ Loki not responding — restart with: systemctl restart loki"
+    fi
+    
+    # Check Promtail
+    if curl -sf --max-time 3 "http://127.0.0.1:9080/loki/api/v1/tail" &>/dev/null; then
+        ok "✓ Promtail responding (127.0.0.1:9080)"
+        (( checks_passed++ ))
+    else
+        warn "✗ Promtail not responding — restart with: systemctl restart promtail"
+    fi
+    
+    # Check Grafana
+    if curl -sf --max-time 3 "http://127.0.0.1:3001/api/health" &>/dev/null; then
+        ok "✓ Grafana responding (127.0.0.1:3001)"
+        (( checks_passed++ ))
+    else
+        warn "✗ Grafana not responding — restart with: systemctl restart grafana-server"
+    fi
+    
+    # Check PM2 exporter
+    if curl -sf --max-time 3 "http://127.0.0.1:9209/metrics" &>/dev/null; then
+        ok "✓ PM2 exporter responding (127.0.0.1:9209)"
+        (( checks_passed++ ))
+    else
+        warn "⚠ PM2 exporter not responding yet (may need an app running) — expected for new installations"
+    fi
+    
+    ok "Health checks: $checks_passed/$checks_total passed"
 
     # ── G. server_status — quick CLI overview script ──────────────────────────
     # Capture username for use inside heredoc
@@ -1808,14 +1943,49 @@ setup_firewall() {
         warn "UFW not installed: apt-get install -y ufw"; section_end; return
     fi
 
+    # Detect SSH port from sshd_config
+    ssh_port=$(grep -i "^port" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
+    if [[ -z "$ssh_port" || ! "$ssh_port" =~ ^[0-9]+$ ]]; then
+        ssh_port=22
+    fi
+
     run "ufw default deny incoming"
     run "ufw default allow outgoing"
-    run "ufw allow 22/tcp   comment 'SSH'"
+    run "ufw allow $ssh_port/tcp   comment 'SSH'"
     # Monitoring ports (9090/9100/3001) are bound to 127.0.0.1 — no UFW rule needed
+
+    if [[ "$OPEN_NGINX_PORTS" == true ]]; then
+        run "ufw allow 80/tcp comment 'HTTP'"
+        run "ufw allow 443/tcp comment 'HTTPS'"
+    fi
+
+    if [[ "$OPEN_EMAIL_PORTS" == true ]]; then
+        run "ufw allow 25/tcp comment 'SMTP'"
+        run "ufw allow 465/tcp comment 'SMTPS'"
+        run "ufw allow 587/tcp comment 'SMTP Submission'"
+        run "ufw allow 143/tcp comment 'IMAP'"
+        run "ufw allow 993/tcp comment 'IMAPS'"
+        run "ufw allow 110/tcp comment 'POP3'"
+        run "ufw allow 995/tcp comment 'POP3S'"
+    fi
+
+    if [[ -n "$CUSTOM_PORTS" ]]; then
+        IFS=',' read -ra PORTS <<< "$CUSTOM_PORTS"
+        for port in "${PORTS[@]}"; do
+            port=$(echo "$port" | xargs)  # trim whitespace
+            if [[ -n "$port" ]]; then
+                run "ufw allow $port comment 'Custom'"
+            fi
+        done
+    fi
 
     ufw --force enable 2>/dev/null || true
 
-    ok "UFW active: SSH(22) open. Allow other ports as needed."
+    local fw_desc="SSH($ssh_port)"
+    [[ "$OPEN_NGINX_PORTS" == true ]] && fw_desc="$fw_desc, Nginx(80/443)"
+    [[ "$OPEN_EMAIL_PORTS" == true ]] && fw_desc="$fw_desc, Email"
+    [[ -n "$CUSTOM_PORTS" ]] && fw_desc="$fw_desc, Custom($CUSTOM_PORTS)"
+    ok "UFW active: $fw_desc open. Allow other ports as needed."
     info "Open more ports as needed:  sudo ufw allow <port>/tcp"
 
     section_end

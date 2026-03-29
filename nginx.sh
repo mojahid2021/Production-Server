@@ -264,10 +264,20 @@ check_dependencies() {
   # ── 11. ufw / firewalld (optional — firewall awareness) ──────────────────────
   if command -v ufw &>/dev/null; then
     success "ufw — ok (firewall detected)"
-    info "Ensure ports 80 and 443 are open: sudo ufw allow 'Nginx Full'"
+    if ask_yes_no "Automatically open nginx ports (80/443) in UFW?" "y"; then
+      ufw allow 'Nginx Full' 2>/dev/null && success "Nginx ports (80/443) opened in UFW." || warn "Failed to open nginx ports in UFW."
+    else
+      info "Ensure ports 80 and 443 are open: sudo ufw allow 'Nginx Full'"
+    fi
   elif command -v firewall-cmd &>/dev/null; then
     success "firewalld — ok (firewall detected)"
-    info "Ensure ports open: firewall-cmd --add-service=http --add-service=https --permanent"
+    if ask_yes_no "Automatically open nginx ports (80/443) in firewalld?" "y"; then
+      firewall-cmd --add-service=http --add-service=https --permanent 2>/dev/null && \
+      firewall-cmd --reload 2>/dev/null && \
+      success "Nginx ports (80/443) opened in firewalld." || warn "Failed to open nginx ports in firewalld."
+    else
+      info "Ensure ports open: firewall-cmd --add-service=http --add-service=https --permanent"
+    fi
   else
     info "No ufw/firewalld detected — ensure ports 80 and 443 are open manually."
   fi
@@ -901,7 +911,10 @@ REDIR
     ssl_session_tickets       off;
     ssl_stapling              on;
     ssl_stapling_verify       on;
-    resolver                  8.8.8.8 1.1.1.1 valid=300s;
+    # ── OCSP stapling with trusted certificate chain ────────────────────────
+    ssl_trusted_certificate   /etc/ssl/certs/ca-certificates.crt;
+    # ── DNS Resolver — Cloudflare priority (privacy-first, fast) ────────────
+    resolver                  1.1.1.1 1.0.0.1 8.8.8.8 8.8.4.4 valid=300s;
     resolver_timeout          5s;
 
 SSLP
@@ -1092,6 +1105,7 @@ issue_acmesh_cert() {
 
   local cert_dir="/etc/ssl/acmesh/${DOMAIN}"
   mkdir -p "$cert_dir"
+  chmod 700 "$cert_dir"  # Restrict access to root only
 
   info "Trying ${ca_name}..."
 
@@ -1112,12 +1126,43 @@ issue_acmesh_cert() {
       --key-file       "${cert_dir}/privkey.pem" \
       --fullchain-file "${cert_dir}/fullchain.pem" \
       --reloadcmd      "systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null || true" 2>&1 | tail -3
+    
+    # ── Fix certificate file permissions ────────────────────────────────────
+    [[ -f "${cert_dir}/privkey.pem" ]] && chmod 600 "${cert_dir}/privkey.pem"  # Private key: read for root only
+    [[ -f "${cert_dir}/cert.pem" ]] && chmod 644 "${cert_dir}/cert.pem"        # Public cert: readable to all
+    [[ -f "${cert_dir}/fullchain.pem" ]] && chmod 644 "${cert_dir}/fullchain.pem"  # Full chain: readable to all
+    
+    # ── Validate certificate is functional ──────────────────────────────────────
+    if ! openssl x509 -in "${cert_dir}/fullchain.pem" -noout 2>/dev/null; then
+      warn "Certificate file exists but validation failed for: ${DOMAIN}"
+      return 1
+    fi
+    
+    # ── Verify certificate chain is complete ────────────────────────────────
+    local _chain_count; _chain_count=$(grep -c "BEGIN CERTIFICATE" "${cert_dir}/fullchain.pem" 2>/dev/null || echo 0)
+    if [[ "$_chain_count" -lt 2 ]]; then
+      warn "Certificate chain incomplete (${_chain_count} cert(s) found, expected ≥2)"
+    fi
+    
+    # ── Display certificate details for verification ────────────────────────
+    local _issuer; _issuer=$(openssl x509 -in "${cert_dir}/fullchain.pem" -noout -issuer 2>/dev/null | sed 's/issuer=//')
+    local _notbefore; _notbefore=$(openssl x509 -in "${cert_dir}/fullchain.pem" -noout -dates 2>/dev/null | grep notBefore | cut -d= -f2)
+    local _notafter; _notafter=$(openssl x509 -in "${cert_dir}/fullchain.pem" -noout -dates 2>/dev/null | grep notAfter | cut -d= -f2)
+    local _san; _san=$(openssl x509 -in "${cert_dir}/fullchain.pem" -noout -text 2>/dev/null | grep -A 1 "Subject Alternative Name" | tail -1 | sed 's/^[[:space:]]*//;s/,/, /g' || echo "N/A")
+    
     success "${ca_name} certificate issued and installed."
+    info "Issuer:     ${_issuer}"
+    info "Valid from: ${_notbefore}"
+    info "Valid to:   ${_notafter}"
+    info "Domains:    ${_san}"
     success "Auto-renewal: every 30 days, nginx reloads automatically."
     return 0
   fi
+  
+  error "Failed to issue certificate from ${ca_name}. Check your DNS configuration and port 80 access."
   return 1
 }
+
 
 handle_ssl_setup() {
   [[ "$FEAT_SSL" != "true" ]] && return
@@ -1128,6 +1173,11 @@ handle_ssl_setup() {
     acmesh)
       # Prepare webroot for HTTP-01 challenge
       ensure_dir "/var/www/letsencrypt/.well-known/acme-challenge"
+      
+      # ── Set proper permissions for acme challenge directory ──────────────────
+      chmod 755 /var/www/letsencrypt/.well-known/acme-challenge
+      chmod 755 /var/www/letsencrypt/.well-known
+      chmod 755 /var/www/letsencrypt
 
       # Install acme.sh if needed
       [[ -n "${ACME_EMAIL:-}" ]] || ACME_EMAIL=$(ask_input "Email for certificate notices" "admin@${DOMAIN}")
@@ -1148,7 +1198,10 @@ handle_ssl_setup() {
           -out    "${cert_dir}/fullchain.pem" \
           -subj   "/CN=${DOMAIN}" 2>/dev/null
         cp "${cert_dir}/fullchain.pem" "${cert_dir}/cert.pem"
-        chmod 600 "${cert_dir}/privkey.pem"
+        # ── Set proper permissions on self-signed certs ────────────────────────
+        chmod 600 "${cert_dir}/privkey.pem"    # Private key: read for root only
+        chmod 644 "${cert_dir}/cert.pem"       # Public cert: readable to all
+        chmod 644 "${cert_dir}/fullchain.pem"  # Full chain: readable to all
       fi
 
       # When HTTP_TO_HTTPS=false the generated config has no port-80 block, so
@@ -1217,6 +1270,8 @@ TMPVH
     # ── Self-signed ───────────────────────────────────────────────────────────
     selfsigned)
       mkdir -p /etc/ssl/selfsigned
+      info "Generating self-signed certificate for ${DOMAIN}..."
+      
       if [[ "$ENABLE_WWW" == "true" ]]; then
         local tmp_cnf; tmp_cnf=$(mktemp /tmp/ossl-XXXXXX.cnf)
         cat > "$tmp_cnf" <<CNF
@@ -1230,9 +1285,11 @@ x509_extensions=v3_req
 C=US
 ST=State
 L=City
-O=Dev
+O=Development
 CN=${DOMAIN}
 [v3_req]
+basicConstraints=CA:FALSE
+keyUsage=nonRepudiation, digitalSignature, keyEncipherment
 subjectAltName=@alt
 [alt]
 DNS.1=${DOMAIN}
@@ -1241,23 +1298,107 @@ CNF
         openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
           -keyout "/etc/ssl/selfsigned/${DOMAIN}.key" \
           -out    "/etc/ssl/selfsigned/${DOMAIN}.crt" \
-          -config "$tmp_cnf" 2>/dev/null
+          -config "$tmp_cnf" 2>/dev/null || {
+          warn "Failed to generate self-signed certificate"
+          rm -f "$tmp_cnf"
+          return 1
+        }
         rm -f "$tmp_cnf"
-        success "Self-signed SAN cert: ${DOMAIN} + www.${DOMAIN}"
+        
+        # ── Validate generated certificate ─────────────────────────────────────
+        if openssl x509 -in "/etc/ssl/selfsigned/${DOMAIN}.crt" -noout 2>/dev/null; then
+          chmod 600 "/etc/ssl/selfsigned/${DOMAIN}.key"
+          chmod 644 "/etc/ssl/selfsigned/${DOMAIN}.crt"
+          local _san_list; _san_list=$(openssl x509 -in "/etc/ssl/selfsigned/${DOMAIN}.crt" -noout -text 2>/dev/null | grep -A 1 "Subject Alternative Name" | tail -1 | sed 's/^[[:space:]]*//;s/,/, /g')
+          local _notafter; _notafter=$(openssl x509 -in "/etc/ssl/selfsigned/${DOMAIN}.crt" -noout -dates 2>/dev/null | grep notAfter | cut -d= -f2)
+          success "Self-signed SAN cert: ${DOMAIN} + www.${DOMAIN}"
+          info "Domains:   ${_san_list}"
+          info "Expires:   ${_notafter}"
+          info "Note:      ⚠️  Browser warning expected (self-signed only for dev/testing)"
+        else
+          error "Certificate validation failed"
+          return 1
+        fi
       else
         openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
           -keyout "/etc/ssl/selfsigned/${DOMAIN}.key" \
           -out    "/etc/ssl/selfsigned/${DOMAIN}.crt" \
-          -subj   "/C=US/ST=State/L=City/O=Dev/CN=${DOMAIN}" 2>/dev/null
-        success "Self-signed cert generated."
+          -subj   "/C=US/ST=State/L=City/O=Development/CN=${DOMAIN}" 2>/dev/null || {
+          warn "Failed to generate self-signed certificate"
+          return 1
+        }
+        
+        # ── Validate generated certificate ─────────────────────────────────────
+        if openssl x509 -in "/etc/ssl/selfsigned/${DOMAIN}.crt" -noout 2>/dev/null; then
+          chmod 600 "/etc/ssl/selfsigned/${DOMAIN}.key"
+          chmod 644 "/etc/ssl/selfsigned/${DOMAIN}.crt"
+          local _notafter; _notafter=$(openssl x509 -in "/etc/ssl/selfsigned/${DOMAIN}.crt" -noout -dates 2>/dev/null | grep notAfter | cut -d= -f2)
+          success "Self-signed certificate generated"
+          info "Domain:    ${DOMAIN}"
+          info "Expires:   ${_notafter}"
+          info "Note:      ⚠️  Browser warning expected (self-signed only for dev/testing)"
+        else
+          error "Certificate validation failed"
+          return 1
+        fi
       fi
       ;;
 
     # ── Manual ────────────────────────────────────────────────────────────────
     manual)
-      [[ ! -f "$SSL_CERT_PATH" ]] && warn "Cert not found: ${SSL_CERT_PATH}" || true
-      [[ ! -f "$SSL_KEY_PATH"  ]] && warn "Key not found:  ${SSL_KEY_PATH}"  || true
-      [[ "$ENABLE_WWW" == "true" ]] && warn "Ensure cert has SAN for www.${DOMAIN}" || true
+      info "Validating manual SSL certificates..."
+      
+      # ── Validate certificate file exists and is valid ────────────────────
+      if [[ ! -f "$SSL_CERT_PATH" ]]; then
+        error "Certificate file not found: ${SSL_CERT_PATH}"
+        return 1
+      fi
+      
+      if ! openssl x509 -in "$SSL_CERT_PATH" -noout 2>/dev/null; then
+        error "Certificate validation failed: ${SSL_CERT_PATH}"
+        return 1
+      fi
+      
+      # ── Validate private key exists and is valid ────────────────────────
+      if [[ ! -f "$SSL_KEY_PATH" ]]; then
+        error "Private key file not found: ${SSL_KEY_PATH}"
+        return 1
+      fi
+      
+      if ! openssl pkey -in "$SSL_KEY_PATH" -noout 2>/dev/null; then
+        error "Private key validation failed: ${SSL_KEY_PATH}"
+        return 1
+      fi
+      
+      # ── Verify certificate chain completeness ──────────────────────────
+      if grep -q "BEGIN CERTIFICATE" "$SSL_CERT_PATH"; then
+        local _chain_count; _chain_count=$(grep -c "BEGIN CERTIFICATE" "$SSL_CERT_PATH")
+        if [[ "$_chain_count" -eq 1 ]]; then
+          warn "Certificate appears to be standalone (only leaf cert). For full chain, concatenate: leaf + intermediate + root"
+        fi
+      fi
+      
+      # ── Display certificate details ────────────────────────────────────
+      local _subject; _subject=$(openssl x509 -in "$SSL_CERT_PATH" -noout -subject 2>/dev/null | sed 's/subject=//')
+      local _issuer; _issuer=$(openssl x509 -in "$SSL_CERT_PATH" -noout -issuer 2>/dev/null | sed 's/issuer=//')
+      local _notafter; _notafter=$(openssl x509 -in "$SSL_CERT_PATH" -noout -dates 2>/dev/null | grep notAfter | cut -d= -f2)
+      
+      success "Manual certificates validated successfully"
+      info "Subject:   ${_subject}"
+      info "Issuer:    ${_issuer}"
+      info "Expires:   ${_notafter}"
+      
+      # ── Check expiration warning ────────────────────────────────────────
+      local _expire_epoch; _expire_epoch=$(openssl x509 -in "$SSL_CERT_PATH" -noout -dates 2>/dev/null | grep notAfter | cut -d= -f2 | date -f - +%s 2>/dev/null || echo 0)
+      local _now_epoch; _now_epoch=$(date +%s)
+      local _days_left; _days_left=$(( (_expire_epoch - _now_epoch) / 86400 ))
+      
+      if [[ "$_days_left" -lt 30 ]]; then
+        warn "Certificate expires in ${_days_left} days — renewal recommended"
+      elif [[ "$_days_left" -lt 0 ]]; then
+        error "Certificate has EXPIRED (${_days_left} days ago)"
+        return 1
+      fi
       ;;
   esac
 }
