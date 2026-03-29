@@ -2379,7 +2379,7 @@ PTSVC
         curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
             | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" \
-            | tee /etc/apt/sources.list.d/clickhouse.list 2>/dev/null || true
+            | tee /etc/apt/sources.list.d/clickhouse.list >/dev/null || true
         apt-get update -qq 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         apt-get install -y clickhouse-server clickhouse-client 2>&1 | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         ok "ClickHouse installed."
