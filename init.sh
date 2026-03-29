@@ -718,7 +718,7 @@ ch_logs_pm2() {
         query="SELECT timestamp, app_name, log_level, message FROM pm2_logs.logs WHERE log_type='pm2' AND app_name='$app' ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact"
     fi
     
-    clickhouse-client --query "$query" 2>/dev/null || echo "ClickHouse not responding"
+    clickhouse-client --port 19000 --query "$query" 2>/dev/null || echo "ClickHouse not responding"
 }
 
 # Query ClickHouse errors (all apps)
@@ -733,26 +733,26 @@ ch_logs_errors() {
         query="SELECT timestamp, app_name, log_level, message FROM pm2_logs.logs WHERE log_level='ERROR' AND app_name='$app' ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact"
     fi
     
-    clickhouse-client --query "$query" 2>/dev/null || echo "ClickHouse not responding"
+    clickhouse-client --port 19000 --query "$query" 2>/dev/null || echo "ClickHouse not responding"
 }
 
 # View system logs in ClickHouse
 ch_logs_system() {
     local limit="${1:-50}"
-    clickhouse-client --query "SELECT timestamp, log_type, message FROM pm2_logs.system_logs ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact" 2>/dev/null || echo "ClickHouse not responding"
+    clickhouse-client --port 19000 --query "SELECT timestamp, log_type, message FROM pm2_logs.system_logs ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact" 2>/dev/null || echo "ClickHouse not responding"
 }
 
 # View Nginx logs in ClickHouse
 ch_logs_nginx() {
     local limit="${1:-50}"
-    clickhouse-client --query "SELECT timestamp, http_status, request_method, request_path, response_time_ms FROM pm2_logs.nginx_logs ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact" 2>/dev/null || echo "ClickHouse not responding"
+    clickhouse-client --port 19000 --query "SELECT timestamp, http_status, request_method, request_path, response_time_ms FROM pm2_logs.nginx_logs ORDER BY timestamp DESC LIMIT $limit FORMAT PrettyCompact" 2>/dev/null || echo "ClickHouse not responding"
 }
 
 # Get log count (storage analysis)
 ch_logs_stats() {
     echo "ClickHouse Log Statistics:"
     echo ""
-    clickhouse-client --query "SELECT 'PM2 logs' as source, COUNT() as count, ROUND(SUM(1)/1024/1024, 2) as size_mb FROM pm2_logs.pm2_logs UNION ALL SELECT 'System logs', COUNT(), ROUND(SUM(1)/1024/1024, 2) FROM pm2_logs.system_logs UNION ALL SELECT 'Nginx logs', COUNT(), ROUND(SUM(1)/1024/1024, 2) FROM pm2_logs.nginx_logs FORMAT PrettyCompact" 2>/dev/null || echo "ClickHouse not responding"
+    clickhouse-client --port 19000 --query "SELECT 'PM2 logs' as source, COUNT() as count, ROUND(SUM(1)/1024/1024, 2) as size_mb FROM pm2_logs.pm2_logs UNION ALL SELECT 'System logs', COUNT(), ROUND(SUM(1)/1024/1024, 2) FROM pm2_logs.system_logs UNION ALL SELECT 'Nginx logs', COUNT(), ROUND(SUM(1)/1024/1024, 2) FROM pm2_logs.nginx_logs FORMAT PrettyCompact" 2>/dev/null || echo "ClickHouse not responding"
 }
 
 # ── ClickHouse shortcuts ──────────────────────────────────────────
@@ -2425,13 +2425,19 @@ CHCFG
     # Start ClickHouse
     systemctl daemon-reload
     systemctl enable --now clickhouse-server 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-    sleep 3  # Wait for ClickHouse to start
+    # Wait for ClickHouse to be ready on port 19000 (up to 30 seconds)
+    local _ch_attempts=0
+    while ! clickhouse-client --port 19000 --query "SELECT 1" &>/dev/null && (( _ch_attempts < 10 )); do
+        (( _ch_attempts++ ))
+        sleep 3
+    done
     ok "ClickHouse service enabled (127.0.0.1:17123 HTTP, 19000 TCP)."
 
     # Create PM2 logs table with 2-day TTL
-    if ! clickhouse-client --query "SHOW TABLES FROM pm2_logs" 2>/dev/null | grep -q "logs"; then
+    if ! clickhouse-client --port 19000 --query "SHOW TABLES FROM pm2_logs" 2>/dev/null | grep -q "logs"; then
         info "Creating ClickHouse unified log schema (PM2 + System + Nginx → ClickHouse)..."
-        clickhouse-client --multiquery <<'CHSQL' 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        local _ch_schema_rc=0
+        clickhouse-client --port 19000 --multiquery <<'CHSQL' 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || _ch_schema_rc=$?
 CREATE DATABASE IF NOT EXISTS pm2_logs;
 
 -- Main unified logs table (all types: PM2, system, nginx)
@@ -2500,7 +2506,11 @@ PARTITION BY toYYYYMMDD(timestamp)
 TTL timestamp + INTERVAL 2 DAY DELETE;
 
 CHSQL
-        ok "ClickHouse: Unified log tables created (2-day auto-retention)."
+        if [[ $_ch_schema_rc -eq 0 ]]; then
+            ok "ClickHouse: Unified log tables created (2-day auto-retention)."
+        else
+            warn "ClickHouse schema creation failed — run: clickhouse-client --port 19000 to diagnose."
+        fi
     else
         ok "ClickHouse: Log tables already exist."
     fi
