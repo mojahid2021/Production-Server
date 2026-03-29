@@ -2039,7 +2039,6 @@ ECOSYSTEMTEMPLATE
         ok "PM2 ecosystem.config.js template created → ~/.pm2/ecosystem.template.js"
         echo -e "  ${GRY}   Customize and use: cp ~/.pm2/ecosystem.template.js ecosystem.config.js${R}"
         echo -e "  ${GRY}   Then start: pm2 start ecosystem.config.js${R}"
-    fi
 
         # Install pm2-prometheus-exporter so PM2 process states appear in Grafana
         su - "$USERNAME" -c "
@@ -2887,6 +2886,21 @@ DASHBOARD_TEMPLATE_LOGS
   }
 }
 DASHBOARD_TEMPLATE_ERRORS
+
+    # 4. Aggregate Dashboard for All-Apps Overview
+    cat > /var/lib/grafana/dashboards/applications/04-aggregate-overview.json <<'DASHBOARD_TEMPLATE_ERRORS'
+{
+  "dashboard": {
+    "title": "📊 Applications — Aggregate Overview",
+    "description": "System-wide log analytics across ALL applications: error trends, log distribution, and health scores",
+    "timezone": "browser",
+    "panels": [
+      {
+        "title": "Total Logs (24h)",
+        "targets": [{"expr": "SELECT COUNT() FROM pm2_logs.logs WHERE timestamp > now() - 86400"}],
+        "type": "stat",
+        "gridPos": {"x": 0, "y": 0, "w": 8, "h": 3},
+        "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "thresholds": {"mode": "absolute", "steps": [{"color": "blue", "value": null}]}}}
       },
       {
         "title": "Error Trend (24h)",
