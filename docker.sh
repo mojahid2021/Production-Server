@@ -1198,46 +1198,14 @@ EOF
 
 #  15 — SMOKE TEST + VERIFICATION
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# (see actual implementation at line 1620)
 
-verify_all() {
-        "type": "stat",
-        "gridPos": {"x": 6, "y": 3, "w": 6, "h": 3}
-      },
-      {
-        "title": "Restart Count",
-        "description": "Times this container has restarted",
-        "targets": [{"expr": "container_oom_events_total{name=~\\\".*\\$\\${container_name}.*\\\"}"}],
-        "type": "stat",
-        "gridPos": {"x": 12, "y": 3, "w": 6, "h": 3}
-      },
-      {
-        "title": "Uptime",
-        "description": "How long container has been running",
-        "targets": [{"expr": "time() - container_start_time_seconds{name=~\\\".*\\$\\${container_name}.*\\\"}"}],
-        "type": "stat",
-        "gridPos": {"x": 18, "y": 3, "w": 6, "h": 3},
-        "fieldConfig": {"defaults": {"unit": "s"}}
-      },
-      {
-        "title": "CPU Usage Trend",
-        "targets": [{"expr": "rate(container_cpu_usage_seconds_total{name=~\\\".*\\$\\${container_name}.*\\\"}[5m]) * 100"}],
-        "type": "timeseries",
-        "gridPos": {"x": 0, "y": 6, "w": 12, "h": 8}
-      },
-      {
-        "title": "Memory Usage Trend",
-        "targets": [{"expr": "container_memory_usage_bytes{name=~\\\".*\\$\\${container_name}.*\\\"} / 1024 / 1024"}],
-        "type": "timeseries",
-        "gridPos": {"x": 12, "y": 6, "w": 12, "h": 8}
-      }
-    ],
-    "refresh": "30s",
-    "time": {"from": "now-6h", "to": "now"},
-    "schemaVersion": 38,
-    "style": "dark",
-    "version": 1
-  }
-}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  16 — SUMMARY
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+print_summary() {
 TEMPLATE_METRICS
 
     # ── 2. Template: Container Logs ──────────────────────────────────────────
