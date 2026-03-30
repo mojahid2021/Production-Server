@@ -2373,15 +2373,30 @@ PTSVC
     
     if ! command -v clickhouse-client &>/dev/null; then
         # Add ClickHouse repository
-        apt-get install -y apt-transport-https ca-certificates curl gnupg 2>&1 | tail -2 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https ca-certificates curl gnupg 2>&1 | tail -2 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         # Download signing key using the modern signed-by method (replaces deprecated apt-key).
         # ClickHouse uses one universal GPG key for both DEB and RPM packages.
-        curl -fsSL 'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
-            | gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        # Use --max-time and --connect-timeout to prevent hanging on unreachable servers,
+        # and download to a temp file first so gpg --dearmor runs as a separate step
+        # (piping curl directly into gpg with -o FILE causes the pipeline to block because
+        # gpg writes to the file rather than stdout, leaving tail/while with nothing to read).
+        local _ch_key_tmp; _ch_key_tmp=$(mktemp /tmp/clickhouse-keyring.XXXXXX.gpg)
+        if curl --max-time 60 --connect-timeout 15 -fsSL \
+                'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
+                -o "$_ch_key_tmp" 2>&1 \
+                | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done; then
+            local _gpg_err
+            _gpg_err=$(gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg \
+                "$_ch_key_tmp" 2>&1) || warn "ClickHouse GPG dearmor failed: $_gpg_err"
+            rm -f "$_ch_key_tmp"
+        else
+            rm -f "$_ch_key_tmp"
+            warn "ClickHouse GPG key download failed — check connectivity to packages.clickhouse.com"
+        fi
         echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" \
             | tee /etc/apt/sources.list.d/clickhouse.list >/dev/null || true
-        apt-get update -qq 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-        apt-get install -y clickhouse-server clickhouse-client 2>&1 | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>&1 | tail -1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y clickhouse-server clickhouse-client 2>&1 | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
         ok "ClickHouse installed."
     else
         ok "ClickHouse already installed."
