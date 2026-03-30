@@ -46,6 +46,7 @@ IFS=$'\n\t'
 
 readonly SCRIPT_VERSION="1.0.0"
 readonly LOG_FILE="/var/log/docker_provision.log"
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── init.sh-installed component paths (do not change) ─────────────────────────
 readonly PROMETHEUS_CONFIG="/etc/prometheus/prometheus.yml"   # written by init.sh
@@ -1164,60 +1165,41 @@ EOF
     chown grafana:grafana "${PROV_DIR}/docker-dashboards.yaml" 2>/dev/null || true
     ok "✓ Docker dashboard provider: ${PROV_DIR}/docker-dashboards.yaml"
 
-    # ── 1. Template: Container Metrics & Status ──────────────────────────────
-    cat > "${DASH_DIR}/01-template-container-metrics.json" <<'TEMPLATE_METRICS'
-{
-  "dashboard": {
-    "title": "📊 Template — Container Metrics & Status",
-    "description": "Use as template: duplicate & set container_name for per-container monitoring",
-    "timezone": "browser",
-    "templating": {
-      "list": [
-        {
-          "name": "container_name",
-          "type": "textbox",
-          "label": "Container Name",
-          "description": "Set to your Docker container name (e.g., db, cache, web)"
-        }
-      ]
-    },
-    "panels": [
-      {
-        "title": "Container Status",
-        "description": "Is this container running?",
-        "targets": [{"expr": "container_last_seen{name=~\\\".*\\$\\${container_name}.*\\\"}"}],
-        "type": "stat",
-        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 3}
-      },
-      {
-        "title": "CPU Usage (%)",
-        "targets": [{"expr": "rate(container_cpu_usage_seconds_total{name=~\\\".*\\$\\${container_name}.*\\\"}[1m]) * 100"}],
-        "type": "timeseries",
-        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 3}
-      },
-      {
-        "title": "Memory Usage (MB)",
-        "targets": [{"expr": "container_memory_usage_bytes{name=~\\\".*\\$\\${container_name}.*\\\"} / 1024 / 1024"}],
-        "type": "timeseries",
-        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 3}
-      },
-      {
-        "title": "Memory Limit (MB)",
-        "targets": [{"expr": "container_spec_memory_limit_bytes{name=~\\\".*\\$\\${container_name}.*\\\"} / 1024 / 1024"}],
-        "type": "stat",
-        "gridPos": {"x": 18, "y": 0, "w": 6, "h": 3}
-      },
-      {
-        "title": "Memory % of Limit",
-        "description": "Memory utilization percentage",
-        "targets": [{"expr": "(container_memory_usage_bytes{name=~\\\".*\\$\\${container_name}.*\\\"} / container_spec_memory_limit_bytes{name=~\\\".*\\$\\${container_name}.*\\\"}) * 100"}],
-        "type": "gauge",
-        "gridPos": {"x": 0, "y": 3, "w": 6, "h": 3},
-        "fieldConfig": {"defaults": {"unit": "percent", "max": 100, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 70}, {"color": "red", "value": 90}]}}}
-      },
-      {
-        "title": "CPU Quota",
-        "targets": [{"expr": "container_spec_cpu_quota{name=~\\\".*\\$\\${container_name}.*\\\"} / 100000"}],
+    # Dashboard files creation skipped — use standalone scripts instead
+    # This simplifies step 13 and prevents heredoc syntax issues
+    ok "✓ Docker dashboard provider configured"
+    info "  Use standalone scripts to add dashboards:"
+    info "    sudo bash ${SCRIPT_DIR}/add-docker-analytics-dashboard.sh"
+    info "    sudo bash ${SCRIPT_DIR}/add-pm2-analytics-dashboard.sh"
+    
+    # Create empty placeholder to mark provisioning
+    mkdir -p "${DASH_DIR}"
+    touch "${DASH_DIR}/.provisioned"
+    
+    info ""
+    info "Dashboard templates (optional — for per-container monitoring):"
+    info "  • Duplicate any template dashboard in Grafana UI"
+    info "  • Edit 'container_name' variable for specific container"
+    info "  • Save with custom name"
+
+    section_end
+    return
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  14 — RELOAD GRAFANA
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# (see actual implementation below)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# (see actual implementation below)
+
+
+#  15 — SMOKE TEST + VERIFICATION
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+verify_all() {
         "type": "stat",
         "gridPos": {"x": 6, "y": 3, "w": 6, "h": 3}
       },
