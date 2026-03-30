@@ -82,6 +82,12 @@ fi
 readonly HR2="════════════════════════════════════════════════════════════════════════════"
 readonly HR="────────────────────────────────────────────────────────────────────────────"
 
+# Service state tracking
+PROM_EXISTS=false
+GRAFANA_EXISTS=false
+LOKI_EXISTS=false
+PROMTAIL_EXISTS=false
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  OUTPUT (identical to init.sh)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -94,6 +100,37 @@ die()   { echo -e "\n  ${CROSS}  ${RED}${BOLD}FATAL: $*${R}\n" >&2; _log ERROR "
 
 section()     { echo ""; echo -e "  ${BLU}${BOLD}┌─ $1 / $2${R}"; echo -e "  ${BLU}${DIM}│${R}"; }
 section_end() { echo -e "  ${BLU}${DIM}└${HR:0:60}${R}"; }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  SERVICE DETECTION — which services already exist?
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+detect_existing_services() {
+    PROM_EXISTS=false
+    GRAFANA_EXISTS=false
+    LOKI_EXISTS=false
+    PROMTAIL_EXISTS=false
+
+    # Check Prometheus
+    if systemctl is-active --quiet prometheus 2>/dev/null || [[ -f "$PROMETHEUS_CONFIG" ]]; then
+        PROM_EXISTS=true
+    fi
+
+    # Check Grafana
+    if systemctl is-active --quiet grafana-server 2>/dev/null || command -v grafana-server &>/dev/null; then
+        GRAFANA_EXISTS=true
+    fi
+
+    # Check Loki (native service installed by init.sh)
+    if systemctl is-active --quiet loki 2>/dev/null || command -v loki &>/dev/null; then
+        LOKI_EXISTS=true
+    fi
+
+    # Check Promtail
+    if systemctl is-active --quiet promtail 2>/dev/null || command -v promtail &>/dev/null; then
+        PROMTAIL_EXISTS=true
+    fi
+}
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  PARSE ARGS
@@ -189,6 +226,23 @@ preflight() {
         fi
     fi
     ok "Deploy user: ${WHT}${BOLD}${DEPLOY_USER}${R}"
+
+    # Detect existing services early
+    detect_existing_services
+    
+    # Report what's already installed
+    if $PROM_EXISTS; then
+        ok "Prometheus already exists — will integrate with existing instance."
+    fi
+    if $GRAFANA_EXISTS; then
+        ok "Grafana already exists — will reuse and add dashboards."
+    fi
+    if $LOKI_EXISTS; then
+        ok "Loki already exists — will integrate with it."
+    fi
+    if $PROMTAIL_EXISTS; then
+        ok "Promtail already exists — will use existing Docker logs component."
+    fi
 
     # Check init.sh components if monitoring is requested
     if $SETUP_MON; then
@@ -613,6 +667,15 @@ deploy_loki_promtail() {
         section "10" "Loki + Promtail"; warn "Skipped (--no-loki)."; section_end; return
     fi
 
+    # If both Loki and Promtail for Docker already exist, skip this section
+    if $LOKI_EXISTS && $PROMTAIL_EXISTS; then
+        section "10" "Loki + Promtail"
+        ok "Both Loki and Promtail already exist — skipping deployment."
+        info "Using existing: Loki (${LOKI_PORT}) + Promtail (Docker log collection)"
+        section_end
+        return
+    fi
+
     section "10" "Loki + Promtail — Docker Log Pipeline"
 
     # ── Detect native Loki (installed by init.sh ≥ v7.0.0) ───────────────────
@@ -863,6 +926,14 @@ PTCFG
 patch_prometheus() {
     $SETUP_MON || return
 
+    if ! $PROM_EXISTS; then
+        section "11" "Prometheus — Patching"
+        warn "Prometheus not found — skipping configuration patch."
+        info "If you install Prometheus later, run: prometheus_patch_docker_scrapes"
+        section_end
+        return
+    fi
+
     section "11" "Prometheus — Patching ${PROMETHEUS_CONFIG}"
 
     # Backup first
@@ -957,6 +1028,14 @@ provision_loki_datasource() {
     $SETUP_MON || return
     $SETUP_LOKI || return
 
+    if ! $GRAFANA_EXISTS; then
+        section "12" "Grafana — Loki Datasource Provisioning"
+        warn "Grafana not found — skipping datasource provisioning."
+        info "If you install Grafana later, run with: sudo ./docker.sh --no-mon"
+        section_end
+        return
+    fi
+
     section "12" "Grafana — Loki Datasource Provisioning"
 
     local DS_DIR="${GRAFANA_PROVISIONING}/datasources"
@@ -1015,6 +1094,14 @@ EOF
 
 provision_dashboards() {
     $SETUP_MON || return
+
+    if ! $GRAFANA_EXISTS; then
+        section "13" "Grafana — Docker Dashboard Provisioning"
+        warn "Grafana not found — skipping dashboard provisioning."
+        info "If you install Grafana later, run with: sudo ./docker.sh --no-mon"
+        section_end
+        return
+    fi
 
     section "13" "Grafana — Docker Dashboard Provisioning"
 
@@ -1510,6 +1597,13 @@ DOCKER_ANALYTICS
 
 reload_grafana() {
     $SETUP_MON || return
+
+    if ! $GRAFANA_EXISTS; then
+        section "14" "Grafana — Reload Provisioning"
+        warn "Grafana not found — skipping reload."
+        section_end
+        return
+    fi
 
     section "14" "Grafana — Reload Provisioning"
 
