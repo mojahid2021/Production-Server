@@ -1095,19 +1095,25 @@ EOF
 provision_dashboards() {
     $SETUP_MON || return
 
-    if ! $GRAFANA_EXISTS; then
-        section "13" "Grafana — Docker Dashboard Provisioning"
-        warn "Grafana not found — skipping dashboard provisioning."
-        info "If you install Grafana later, run with: sudo ./docker.sh --no-mon"
-        section_end
-        return
-    fi
-
     section "13" "Grafana — Docker Dashboard Provisioning"
 
     local DASH_DIR="${GRAFANA_DASH_DIR}/docker"
     local PROV_DIR="${GRAFANA_PROVISIONING}/dashboards"
-    mkdir -p "${DASH_DIR}" "${PROV_DIR}"
+    
+    # Create directories with error handling
+    if ! mkdir -p "${DASH_DIR}" "${PROV_DIR}" 2>/dev/null; then
+        warn "Failed to create dashboard directories."
+        warn "Check permissions: sudo ls -ld /var/lib/grafana"
+        section_end; return
+    fi
+
+    # Check if Grafana directories exist
+    if [[ ! -d "${GRAFANA_PROVISIONING}" ]] || [[ ! -d "${GRAFANA_DASH_DIR}" ]]; then
+        warn "Grafana directories not found — Grafana may not be installed."
+        warn "Expected: ${GRAFANA_PROVISIONING}, ${GRAFANA_DASH_DIR}"
+        info "Run: sudo ./init.sh first to install Grafana with monitoring setup"
+        section_end; return
+    fi
 
     # ── CONFLICT RESOLUTION ──────────────────────────────────────────────────
     # Verify that init.sh created its dashboard providers first
@@ -1151,6 +1157,10 @@ providers:
     options:
       path: ${DASH_DIR}
 EOF
+    if [[ ! -f "${PROV_DIR}/docker-dashboards.yaml" ]]; then
+        warn "Failed to write docker-dashboards provider YAML"
+        section_end; return
+    fi
     chown grafana:grafana "${PROV_DIR}/docker-dashboards.yaml" 2>/dev/null || true
     ok "✓ Docker dashboard provider: ${PROV_DIR}/docker-dashboards.yaml"
 
@@ -1572,21 +1582,20 @@ TEMPLATE_IO
 }
 DOCKER_ANALYTICS
 
-    chown -R grafana:grafana "${DASH_DIR}" 2>/dev/null || true
-    chmod 644 "${DASH_DIR}"/*.json 2>/dev/null || true
+    chown -R grafana:grafana "${DASH_DIR}" 2>/dev/null || warn "Could not change dashboard directory ownership (may need sudo)"
+    chmod 755 "${DASH_DIR}" 2>/dev/null || true
+    [[ -f "${DASH_DIR}"/*.json ]] && chmod 644 "${DASH_DIR}"/*.json 2>/dev/null || true
     
     ok "✓ Dashboard template: Container Metrics & Status"
     ok "✓ Dashboard template: Container Logs"
     ok "✓ Dashboard template: Container Network & Disk I/O"
     ok "✓ Dashboard: 🐳 Docker Per-Container Log Analytics (live data)"
     ok "Saved to: ${DASH_DIR}"
-    ok ""
-    ok "📌 HOW TO CREATE PER-CONTAINER DASHBOARDS:"
-    ok "   1. Duplicate any template dashboard (e.g., 01-template-container-metrics.json)"
-    ok "   2. Open the duplicate in Grafana"
-    ok "   3. Edit template variable 'container_name' and set to your container name"
-    ok "   4. Save with your container name as dashboard title"
-    ok "   5. Queries auto-filter to show only that container's data"
+    info ""
+    info "📌 Dashboard Provisioning:"
+    info "   • Automatic: Grafana loads dashboards from ${DASH_DIR}/"
+    info "   • Folders: Docker → dashboards organized in Grafana UI"
+    info "   • Refresh: 30 seconds (auto-reload any changes)"
 
     section_end
 }
