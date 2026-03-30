@@ -1746,7 +1746,7 @@ APPLOGS
       "pluginVersion": "10.0.0",
       "targets": [
         { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(rate(count_over_time({job=\"pm2\"} |= \"SUCCESS\" or |= \"INFO\" or |= \"success\" [5m]))) / (sum(rate(count_over_time({job=\"pm2\"} [5m]))) + 1) * 100",
+          "expr": "100 * (sum(count_over_time({job=\"pm2\"}[5m])) - sum(count_over_time({job=\"pm2\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({job=\"pm2\"}[5m])) + 1)",
           "legendFormat": "Success Rate",
           "refId": "A" }
       ],
@@ -1772,7 +1772,7 @@ APPLOGS
       "pluginVersion": "10.0.0",
       "targets": [
         { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(rate(count_over_time({job=\"pm2\"} |= \"ERROR\" or |= \"Exception\" or |= \"error\" [5m]))) / (sum(rate(count_over_time({job=\"pm2\"} [5m]))) + 1) * 100",
+          "expr": "100 * sum(count_over_time({job=\"pm2\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({job=\"pm2\"}[5m])) + 1)",
           "legendFormat": "Error Rate",
           "refId": "A" }
       ],
@@ -1798,7 +1798,7 @@ APPLOGS
       "pluginVersion": "10.0.0",
       "targets": [
         { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(rate(count_over_time({job=\"pm2\"} |= \"WARN\" or |= \"WARNING\" or |= \"warning\" [5m]))) / (sum(rate(count_over_time({job=\"pm2\"} [5m]))) + 1) * 100",
+          "expr": "100 * sum(count_over_time({job=\"pm2\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({job=\"pm2\"}[5m])) + 1)",
           "legendFormat": "Warning Rate",
           "refId": "A" }
       ],
@@ -1839,7 +1839,7 @@ APPLOGS
                    "tooltip": { "mode": "multi" } },
       "targets": [
         { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum by (name) (rate(count_over_time({job=\"pm2\"} |= \"ERROR\" or |= \"Exception\" [5m])))",
+          "expr": "sum(count_over_time({job=\"pm2\"} |~ \"ERROR|Exception\" [5m])) by (name)",
           "legendFormat": "{{name}}",
           "refId": "A" }
       ],
@@ -1859,7 +1859,7 @@ APPLOGS
                    "tooltip": { "mode": "multi" } },
       "targets": [
         { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum by (name) (rate(count_over_time({job=\"pm2\"} |= \"WARN\" or |= \"WARNING\" [5m])))",
+          "expr": "sum(count_over_time({job=\"pm2\"} |~ \"WARN|WARNING\" [5m])) by (name)",
           "legendFormat": "{{name}}",
           "refId": "A" }
       ],
