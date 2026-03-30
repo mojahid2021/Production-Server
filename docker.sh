@@ -1300,12 +1300,198 @@ TEMPLATE_LOGS
 }
 TEMPLATE_IO
 
+    # ── Docker Per-Container Log Analytics Dashboard ──────────────────────────
+    # Similar to PM2 analytics but for Docker containers — shows success/error/warning rates
+    cat > "${DASH_DIR}/04-docker-per-container-analytics.json" <<'DOCKER_ANALYTICS'
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "green", "value": 90 }
+          ] },
+          "unit": "percent" },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto", "showPercentage": true },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * (sum(count_over_time({job=\"docker_containers\"}[5m])) - sum(count_over_time({job=\"docker_containers\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({job=\"docker_containers\"}[5m])) + 1)",
+          "legendFormat": "Success Rate",
+          "refId": "A" }
+      ],
+      "title": "✅ Success Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "red", "value": 10 }
+          ] },
+          "unit": "percent" },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto", "showPercentage": true },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({job=\"docker_containers\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({job=\"docker_containers\"}[5m])) + 1)",
+          "legendFormat": "Error Rate",
+          "refId": "A" }
+      ],
+      "title": "❌ Error Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "yellow", "value": null },
+            { "color": "yellow", "value": 5 }
+          ] },
+          "unit": "percent" },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto", "showPercentage": true },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({job=\"docker_containers\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({job=\"docker_containers\"}[5m])) + 1)",
+          "legendFormat": "Warning Rate",
+          "refId": "A" }
+      ],
+      "title": "⚠️ Warning Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short",
+          "custom": { "hideFrom": { "legend": false, "tooltip": false, "viz": false } } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "legend": { "calcs": [], "displayMode": "list", "placement": "bottom" },
+                   "pieType": "donut", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "tooltip": { "mode": "single" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"docker_containers\"}[1m]))",
+          "legendFormat": "Log Count",
+          "refId": "A" }
+      ],
+      "title": "📊 Log Distribution",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" },
+                   "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"docker_containers\"} |~ \"ERROR|Exception\" [5m])) by (container_name)",
+          "legendFormat": "{{container_name}}",
+          "refId": "A" }
+      ],
+      "title": "Errors per Container",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" },
+                   "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"docker_containers\"} |~ \"WARN|WARNING\" [5m])) by (container_name)",
+          "legendFormat": "{{container_name}}",
+          "refId": "A" }
+      ],
+      "title": "Warnings per Container",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "custom": { "showThresholdLabels": false, "showThresholdMarkers": true } },
+        "overrides": []
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "id": 7,
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "prettifyLogMessage": false,
+                   "showCommonLabels": false, "showLabels": true, "showTime": true,
+                   "sortOrder": "Descending", "wrapLogMessage": true },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{job=\"docker_containers\"}",
+          "legendFormat": "",
+          "refId": "A" }
+      ],
+      "title": "📋 Detailed Docker Container Logs",
+      "type": "logs"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "tags": ["docker", "containers", "analytics", "loki"],
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "🐳 Docker Per-Container Log Analytics",
+  "description": "Detailed log-based analytics: success/error/warning rates, per-container metrics, full log viewer",
+  "uid": "docker-per-container-analytics",
+  "version": 1,
+  "style": "dark"
+}
+DOCKER_ANALYTICS
+
     chown -R grafana:grafana "${DASH_DIR}" 2>/dev/null || true
     chmod 644 "${DASH_DIR}"/*.json 2>/dev/null || true
     
     ok "✓ Dashboard template: Container Metrics & Status"
     ok "✓ Dashboard template: Container Logs"
     ok "✓ Dashboard template: Container Network & Disk I/O"
+    ok "✓ Dashboard: 🐳 Docker Per-Container Log Analytics (live data)"
     ok "Saved to: ${DASH_DIR}"
     ok ""
     ok "📌 HOW TO CREATE PER-CONTAINER DASHBOARDS:"
