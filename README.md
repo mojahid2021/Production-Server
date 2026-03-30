@@ -31,9 +31,9 @@ A curated collection of production-grade bash scripts that transform a blank Ubu
 │  │ Prometheus│  │  acme.sh │  │                      │  │
 │  │ Grafana   │  └──────────┘  └──────────────────────┘  │
 │  │ Loki      │                                          │
-│  │ Promtail  │  Monitoring stack (port 3001)            │
-│  └──────────┘  ┌─────────────────────────────────────┐  │
-│                │  Grafana  ←  Prometheus  ←  node_exp │  │
+│  │ Promtail  │  Monitoring stack (port 13001)           │
+│  │ClickHouse │  ┌─────────────────────────────────────┐  │
+│  └──────────┘  │  Grafana  ←  Prometheus  ←  node_exp │  │
 │                │  Grafana  ←  Loki  ←  Promtail       │  │
 │                │  Grafana  ←  PM2 exporter  ←  PM2    │  │
 │                └─────────────────────────────────────┘  │
@@ -67,9 +67,10 @@ sudo ./init.sh
 | PM2 | Process manager with bulletproof systemd startup |
 | PM2 exporter | Prometheus metrics for all PM2 apps (auto-discovered) |
 | Prometheus | Metrics database — node, PM2, system (15-day retention) |
-| Grafana | Dashboard UI on `127.0.0.1:3001` |
+| Grafana | Dashboard UI on `127.0.0.1:13001` |
 | Loki | Log aggregation backend on `127.0.0.1:3100` |
 | Promtail | Log agent — collects syslog, auth, kern, PM2 app logs |
+| ClickHouse | 2-day short-term log backend for analytical queries |
 | Kernel hardening | sysctl — SYN flood, IP spoof, file descriptor tuning |
 | fail2ban | SSH brute-force protection (ban after 5 failures) |
 | UFW firewall | SSH open; monitoring ports bound to localhost |
@@ -153,8 +154,8 @@ sudo ./nginx.sh
     sudo ./nginx.sh
 
 5.  Monitor everything in Grafana
-    ssh -L 3001:localhost:3001 <user>@<server>
-    # open http://localhost:3001  (admin / admin — change immediately)
+    ssh -L 13001:localhost:13001 <user>@<server>
+    # open http://localhost:13001  (admin / admin — change immediately)
     #   System tab  → Node Exporter Full  (CPU, RAM, disk, network)
     #   Apps tab    → PM2 Process Monitor (per-app status, CPU, RAM, restarts)
     #   Explore     → Loki datasource     (system logs, auth, PM2 app logs)
@@ -168,21 +169,22 @@ All monitoring services are bound to `127.0.0.1` and accessed via SSH port forwa
 
 | Service | Address | Purpose |
 |---------|---------|---------|
-| Grafana | `127.0.0.1:3001` | Dashboard UI — metrics + logs |
+| Grafana | `127.0.0.1:13001` | Dashboard UI — metrics + logs |
 | Prometheus | `127.0.0.1:9090` | Metrics database |
 | node_exporter | `127.0.0.1:9100` | System metrics collector |
 | PM2 exporter | `127.0.0.1:9209` | PM2 process metrics (auto-discovered) |
 | Loki | `127.0.0.1:3100` | Log aggregation backend |
 | Promtail | `127.0.0.1:9080` | Log collection agent |
+| ClickHouse | `127.0.0.1:17123` | Short-term log analytics backend (2-day retention) |
 
 **Accessing Grafana:**
 
 ```bash
 # Forward port over SSH
-ssh -L 3001:localhost:3001 <user>@<server-ip>
+ssh -L 13001:localhost:13001 <user>@<server-ip>
 
 # Then open in your browser
-http://localhost:3001
+http://localhost:13001
 # Default credentials: admin / admin  (change on first login)
 ```
 

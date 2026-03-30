@@ -324,7 +324,19 @@ nginx-logs    # tail -f /var/log/nginx/*.log
 
 ---
 
-### 9. Monitoring — Four Layers
+### 9. Monitoring — Full Stack
+
+The monitoring stack installed by `init.sh` provides metrics, logs, and a browser dashboard — all bound to localhost and accessed via SSH tunnel.
+
+| Service | Address | Purpose |
+|---|---|---|
+| node_exporter | `127.0.0.1:9100` | OS-level metrics (CPU, RAM, disk, network) |
+| PM2 exporter | `127.0.0.1:9209` | Per-app PM2 process metrics (auto-discovered) |
+| Prometheus | `127.0.0.1:9090` | Metrics database — 15-day retention |
+| Loki | `127.0.0.1:3100` | Log aggregation backend |
+| Promtail | `127.0.0.1:9080` | Log agent — syslog, auth, kern, PM2 app logs |
+| ClickHouse | `127.0.0.1:17123` | Short-term log analytics backend (2-day retention) |
+| Grafana | `127.0.0.1:13001` | Dashboard UI — metrics + logs |
 
 #### Layer 1: `server_status` — Instant CLI Overview
 
@@ -354,28 +366,64 @@ pm2 logs    # live scrolling log output from all apps
 
 #### Layer 3: Prometheus — Metrics Collection and Storage
 
-Prometheus is installed as a background service and collects system metrics from `node_exporter` every 15 seconds. Metrics are stored locally for 15 days.
+Prometheus is installed as a background service and collects system metrics from `node_exporter` and `PM2 exporter` every 15 seconds. Metrics are stored locally for 15 days.
 
 - **node_exporter** scrapes OS-level metrics (CPU, RAM, disk, network) from `127.0.0.1:9100`
+- **PM2 exporter** exposes per-app process metrics (status, CPU, RAM, restarts) from `127.0.0.1:9209`
 - **Prometheus** stores time-series data at `127.0.0.1:9090`
-- Both services run as dedicated system users under systemd
+- All services run as dedicated system users under systemd
 
-#### Layer 4: Grafana — Beautiful Real-Time Browser Dashboard
+#### Layer 4: Loki + Promtail — Log Aggregation
 
-Grafana is installed during provisioning and runs as a background service. It is bound to `127.0.0.1:3001` — not accessible from the internet. You access it through an SSH tunnel:
+Loki is a log aggregation backend installed alongside Promtail, a log shipping agent.
+
+- **Promtail** (`127.0.0.1:9080`) reads `/var/log/syslog`, `/var/log/auth.log`, `/var/log/kern.log`, and all PM2 app log files
+- **Loki** (`127.0.0.1:3100`) stores and indexes the log streams for querying in Grafana
+- Query logs in Grafana → Explore → select Loki datasource
+
+```logql
+# All PM2 app logs
+{job="pm2"}
+
+# Only error lines from PM2 apps
+{job="pm2"} |= "error"
+
+# Authentication log (SSH logins, sudo)
+{job="auth"}
+
+# System syslog
+{job="syslog"}
+
+# Kernel messages
+{job="kern"}
+```
+
+#### Layer 5: ClickHouse — Short-Term Log Analytics
+
+ClickHouse is installed as a columnar analytics backend for fast structured log queries.
+
+- Listens on `127.0.0.1:17123` (HTTP) and `127.0.0.1:19000` (native TCP)
+- Stores PM2 app logs and system logs for 2 days
+- Enables analytical SQL queries over log data
+
+#### Layer 6: Grafana — Browser Dashboard
+
+Grafana is installed during provisioning and runs as a background service. It is bound to `127.0.0.1:13001` — not accessible from the internet. You access it through an SSH tunnel:
 
 ```bash
 # Step 1: Run this on your LOCAL machine (laptop/PC):
-ssh -L 3001:localhost:3001 mojahid@your-server-ip
+ssh -L 13001:localhost:13001 mojahid@your-server-ip
 
 # Step 2: Open in your browser:
-http://localhost:3001
+http://localhost:13001
 # Default login: admin / admin  ← change this on first login!
 ```
 
 Grafana comes pre-configured with:
 - **Prometheus** connected as the default data source
+- **Loki** connected as a log data source
 - **Node Exporter Full** dashboard (ID 1860) pre-loaded in the *System* folder
+- **PM2 Process Monitor** dashboard pre-loaded in the *Apps* folder
 
 The dashboard shows beautiful, interactive graphs updating every 15 seconds:
 - CPU usage (per core, overall, idle/system/user breakdown)
@@ -383,7 +431,7 @@ The dashboard shows beautiful, interactive graphs updating every 15 seconds:
 - Disk read/write speed and I/O utilisation
 - Network in/out bandwidth per interface
 - System load average (1m, 5m, 15m)
-- Per-process CPU and memory
+- Per-process CPU and memory (PM2 apps)
 - Full alert support via Grafana's built-in Alerting UI
 
 ---
@@ -428,7 +476,7 @@ UFW (Uncomplicated Firewall) is configured with a deny-all default policy. Only 
 | 22 (SSH) | ✅ | Remote access |
 | 80 (HTTP) | ✅ | Nginx + Let's Encrypt |
 | 443 (HTTPS) | ✅ | Nginx SSL |
-| 9090, 9100, 3001 (monitoring) | ❌ | Bound to 127.0.0.1 — no external rule needed |
+| 9090, 9100, 13001 (monitoring) | ❌ | Bound to 127.0.0.1 — no external rule needed |
 | 3000, 4000, 5000... | ❌ | App ports — localhost only via Nginx |
 
 Your Node.js apps are **never** directly exposed to the internet. Traffic always goes through Nginx.
@@ -480,7 +528,7 @@ Every login session is configured with sane, secure defaults written to `~/.depl
 | **PM2 startup is bulletproof** | Uses the exact NVM binary path — does not silently fail |
 | **Multi-project Nginx** | Host unlimited projects on one server |
 | **`nginx_add_site` helper** | Add a new project to Nginx in one command |
-| **Four monitoring layers** | Terminal, PM2, Prometheus metrics, and Grafana browser dashboard |
+| **Full monitoring stack** | Terminal status, PM2 monitor, Prometheus metrics, Loki log aggregation, ClickHouse analytics, and Grafana browser dashboard |
 | **Both SSH auth methods** | Password and key — flexible for different workflows |
 | **Sudo is layered** | Common tasks need no password, sensitive operations do |
 | **Kernel hardening** | Protection applied at OS level, not just app level |
@@ -619,6 +667,15 @@ All aliases are available immediately after login.
 | `/var/log/nginx/` | Nginx access and error logs (rotated every 30 days) |
 | `/usr/local/bin/nginx_add_site` | Helper to add a new project to Nginx |
 | `/usr/local/bin/server_status` | Quick server overview CLI tool |
+| `/etc/prometheus/prometheus.yml` | Prometheus scrape configuration |
+| `/var/lib/prometheus/` | Prometheus time-series data (15-day retention) |
+| `/etc/grafana/grafana.ini` | Grafana configuration (port 13001) |
+| `/etc/grafana/provisioning/` | Grafana datasource + dashboard provisioning |
+| `/var/lib/grafana/dashboards/` | Pre-provisioned Grafana dashboard JSON files |
+| `/etc/loki/loki.yaml` | Loki configuration |
+| `/var/lib/loki/` | Loki log storage |
+| `/etc/promtail/promtail.yaml` | Promtail log agent configuration |
+| `/etc/clickhouse-server/` | ClickHouse server configuration |
 | `/etc/sudoers.d/90-<user>` | Sudo rules for the deploy user |
 | `/etc/fail2ban/jail.d/node-provision.conf` | fail2ban SSH jail config |
 | `/etc/sysctl.d/99-node-provision.conf` | Kernel hardening sysctl settings |
@@ -693,8 +750,8 @@ sudo ufw status
 ### Access Grafana dashboard
 ```bash
 # On your LOCAL machine:
-ssh -L 3001:localhost:3001 mojahid@your-server-ip
-# Then open: http://localhost:3001  (login: admin / admin)
+ssh -L 13001:localhost:13001 mojahid@your-server-ip
+# Then open: http://localhost:13001  (login: admin / admin)
 ```
 
 ### Check fail2ban bans
@@ -775,7 +832,7 @@ cat /var/log/node_provision.log
 - **Password login is enabled** — convenient but weaker than key-only. If you add your SSH public key via `-k`, consider disabling password auth later: edit `/etc/ssh/sshd_config`, set `PasswordAuthentication no`, reload sshd.
 - **Root SSH login is permanently blocked** — `PermitRootLogin no` is enforced. To reach root: `ssh` as your deploy user, then `sudo -i`. This is intentional and should not be changed.
 - **The deploy user has full sudo** — the password for this user is effectively the key to the server. Store it in a secrets manager (Bitwarden, 1Password, etc.).
-- **Monitoring stack is localhost-only** — Grafana (3001), Prometheus (9090), and node_exporter (9100) are all bound to 127.0.0.1. Access is always via SSH tunnel.
+- **Monitoring stack is localhost-only** — Grafana (13001), Prometheus (9090), Loki (3100), ClickHouse (17123), and node_exporter (9100) are all bound to 127.0.0.1. Access is always via SSH tunnel.
 - **fail2ban is active** — 5 failed SSH attempts = 1 hour IP ban. Adjust in `/etc/fail2ban/jail.d/node-provision.conf`.
 - **Nginx blocks secret files** — `.env`, `.git`, `.key`, `.pem`, `.sh` files are blocked at the Nginx level and return 404.
 - **Kernel hardening is applied** — SYN flood, IP spoofing, redirect attacks, and symlink exploits are all mitigated via sysctl.
