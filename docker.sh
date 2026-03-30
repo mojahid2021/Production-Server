@@ -216,7 +216,120 @@ preflight() {
         fi
     fi
 
+    check_dependencies
+
     section_end
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  DEPENDENCY CHECK + AUTO-INSTALL
+#  Verifies all tools required before Docker installation begins.
+#  Missing packages are installed automatically so the script can continue.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+check_dependencies() {
+    info "Checking required tools and libraries..."
+
+    # Always apt on Ubuntu/Debian (already validated above)
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
+
+    # ── Helper ───────────────────────────────────────────────────────────────
+    _pkg_install() {
+        DEBIAN_FRONTEND=noninteractive apt-get install -y "$1" \
+            2>&1 | grep -E '(Setting up|already installed)' || true
+    }
+
+    # ── 1. bash >= 4 ─────────────────────────────────────────────────────────
+    local bash_ver="${BASH_VERSINFO[0]:-0}"
+    if (( bash_ver < 4 )); then
+        die "Bash 4+ required (found bash ${bash_ver}). Install a newer bash first."
+    fi
+    ok "bash ${BASH_VERSION} — ok"
+
+    # ── 2. curl (Docker GPG key download, image pulls) ────────────────────────
+    if command -v curl &>/dev/null; then
+        ok "curl $(curl --version 2>/dev/null | head -1 | awk '{print $2}') — ok"
+    else
+        warn "curl not found — installing..."
+        _pkg_install curl
+        command -v curl &>/dev/null && ok "curl installed." \
+            || die "Failed to install curl. Install it manually and re-run."
+    fi
+
+    # ── 3. gnupg (Docker repo signing key) ───────────────────────────────────
+    if command -v gpg &>/dev/null; then
+        ok "gnupg — ok"
+    else
+        warn "gnupg not found — installing..."
+        _pkg_install gnupg
+        command -v gpg &>/dev/null && ok "gnupg installed." \
+            || die "Failed to install gnupg. Install it manually and re-run."
+    fi
+
+    # ── 4. lsb-release (OS codename for Docker repo URL) ─────────────────────
+    if command -v lsb_release &>/dev/null; then
+        ok "lsb-release — ok"
+    else
+        warn "lsb-release not found — installing..."
+        _pkg_install lsb-release
+        command -v lsb_release &>/dev/null && ok "lsb-release installed." \
+            || warn "lsb-release not available — Docker repo setup may fail."
+    fi
+
+    # ── 5. ca-certificates (HTTPS connections) ───────────────────────────────
+    if dpkg -l ca-certificates &>/dev/null 2>&1; then
+        ok "ca-certificates — ok"
+    else
+        info "ca-certificates not found — installing..."
+        _pkg_install ca-certificates
+        ok "ca-certificates installed."
+    fi
+
+    # ── 6. jq (JSON config parsing — Prometheus/Grafana patching) ────────────
+    if command -v jq &>/dev/null; then
+        ok "jq $(jq --version 2>/dev/null) — ok"
+    else
+        info "jq not found — installing..."
+        _pkg_install jq
+        command -v jq &>/dev/null && ok "jq installed." \
+            || warn "jq not available — JSON config steps will use sed fallbacks."
+    fi
+
+    # ── 7. wget (fallback downloader) ────────────────────────────────────────
+    if command -v wget &>/dev/null; then
+        ok "wget — ok"
+    else
+        info "wget not found — installing (fallback downloader)..."
+        _pkg_install wget
+        command -v wget &>/dev/null && ok "wget installed." \
+            || warn "wget not available — curl will be used exclusively."
+    fi
+
+    # ── 8. coreutils: awk, grep, sed, cut, sort ──────────────────────────────
+    local core_ok=true
+    for _tool in awk grep sed cut sort; do
+        if ! command -v "$_tool" &>/dev/null; then
+            warn "Missing coreutil: ${_tool}"
+            core_ok=false
+        fi
+    done
+    if $core_ok; then
+        ok "coreutils (awk, grep, sed, cut, sort) — ok"
+    else
+        warn "Some coreutils missing — installing..."
+        _pkg_install coreutils
+    fi
+
+    # ── 9. systemctl (Docker service management) ─────────────────────────────
+    if command -v systemctl &>/dev/null; then
+        ok "systemctl — ok"
+    elif command -v service &>/dev/null; then
+        ok "service (SysV init) — ok"
+    else
+        warn "No systemctl or service found — Docker service management may require manual steps."
+    fi
+
+    ok "Dependency check complete — all required tools are available."
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
