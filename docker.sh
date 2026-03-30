@@ -1099,10 +1099,11 @@ provision_dashboards() {
     section "13" "Grafana — Docker Dashboard Provisioning"
 
     local DASH_DIR="${GRAFANA_DASH_DIR}/docker"
+    local APP_DASH_DIR="${GRAFANA_DASH_DIR}/applications"
     local PROV_DIR="${GRAFANA_PROVISIONING}/dashboards"
     
     # Create directories with error handling
-    if ! mkdir -p "${DASH_DIR}" "${PROV_DIR}" 2>/dev/null; then
+    if ! mkdir -p "${DASH_DIR}" "${APP_DASH_DIR}" "${PROV_DIR}" 2>/dev/null; then
         warn "Failed to create dashboard directories."
         warn "Check permissions: sudo ls -ld /var/lib/grafana"
         section_end; return
@@ -1165,22 +1166,637 @@ EOF
     chown grafana:grafana "${PROV_DIR}/docker-dashboards.yaml" 2>/dev/null || true
     ok "✓ Docker dashboard provider: ${PROV_DIR}/docker-dashboards.yaml"
 
-    # Dashboard files creation skipped — use standalone scripts instead
-    # This simplifies step 13 and prevents heredoc syntax issues
-    ok "✓ Docker dashboard provider configured"
-    info "  Use standalone scripts to add dashboards:"
-    info "    sudo bash ${SCRIPT_DIR}/add-docker-analytics-dashboard.sh"
-    info "    sudo bash ${SCRIPT_DIR}/add-pm2-analytics-dashboard.sh"
-    
-    # Create empty placeholder to mark provisioning
-    mkdir -p "${DASH_DIR}"
-    touch "${DASH_DIR}/.provisioned"
-    
+    # ── Create Docker Analytics Dashboard (Aggregated) ──────────────────────────
+    if [[ -f "${DASH_DIR}/04-docker-per-container-analytics.json" ]]; then
+        ok "✓ Docker per-container analytics dashboard already exists — skipping"
+    else
+        ok "✓ Creating Docker Per-Container Log Analytics dashboard..."
+        cat > "${DASH_DIR}/04-docker-per-container-analytics.json" <<'DOCKER_ANALYTICS'
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "green", "value": 90 }
+          ] },
+          "unit": "percent" },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * (sum(count_over_time({job=\"docker_containers\"}[5m])) - sum(count_over_time({job=\"docker_containers\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({job=\"docker_containers\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "✅ Success Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "red", "value": 10 }
+          ] },
+          "unit": "percent" },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({job=\"docker_containers\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({job=\"docker_containers\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "❌ Error Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "yellow", "value": null },
+            { "color": "yellow", "value": 5 }
+          ] },
+          "unit": "percent" },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({job=\"docker_containers\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({job=\"docker_containers\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "⚠️ Warning Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"docker_containers\"} |~ \"ERROR|Exception\" [5m])) by (container_name)",
+          "refId": "A" }
+      ],
+      "title": "Errors per Container",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"docker_containers\"} |~ \"WARN|WARNING\" [5m])) by (container_name)",
+          "refId": "A" }
+      ],
+      "title": "Warnings per Container",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "id": 7,
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showLabels": true, "showTime": true, "sortOrder": "Descending" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{job=\"docker_containers\"}",
+          "refId": "A" }
+      ],
+      "title": "📋 Docker Container Logs",
+      "type": "logs"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "tags": ["docker", "containers", "loki"],
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "🐳 Docker Per-Container Log Analytics",
+  "uid": "docker-per-container-analytics",
+  "version": 1,
+  "style": "dark"
+}
+DOCKER_ANALYTICS
+
+        chmod 644 "${DASH_DIR}/04-docker-per-container-analytics.json"
+        chown grafana:grafana "${DASH_DIR}/04-docker-per-container-analytics.json" 2>/dev/null || true
+    fi
+
+    # ── Create Per-Container Template Dashboard ──────────────────────────────────
+    if [[ -f "${DASH_DIR}/05-template-per-container-analytics.json" ]]; then
+        ok "✓ Docker per-container template dashboard already exists — skipping"
+    else
+        ok "✓ Creating Docker per-container template dashboard..."
+        cat > "${DASH_DIR}/05-template-per-container-analytics.json" <<'TEMPLATE_CONTAINER'
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "description": "Template: Duplicate & set container_name for each container",
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "name": "container_name",
+        "type": "textbox",
+        "label": "📦 Container Name",
+        "description": "Set to your Docker container name",
+        "value": "nginx",
+        "current": { "text": "nginx", "value": "nginx" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "green", "value": 90 }
+          ] },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * (sum(count_over_time({container_name=\"${container_name}\"}[5m])) - sum(count_over_time({container_name=\"${container_name}\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({container_name=\"${container_name}\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "✅ Success Rate — ${container_name}",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "red", "value": 10 }
+          ] },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({container_name=\"${container_name}\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({container_name=\"${container_name}\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "❌ Error Rate — ${container_name}",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "yellow", "value": null },
+            { "color": "yellow", "value": 5 }
+          ] },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+                   "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({container_name=\"${container_name}\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({container_name=\"${container_name}\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "⚠️ Warning Rate — ${container_name}",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" } },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "legend": { "calcs": ["sum"] } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({container_name=\"${container_name}\"}[5m]))",
+          "refId": "A" }
+      ],
+      "title": "📊 Log Count — ${container_name}",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "table" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({container_name=\"${container_name}\"} |~ \"ERROR|Exception\" [5m]))",
+          "refId": "A" }
+      ],
+      "title": "❌ Error Trend — ${container_name}",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "table" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({container_name=\"${container_name}\"} |~ \"WARN|WARNING\" [5m]))",
+          "refId": "A" }
+      ],
+      "title": "⚠️ Warning Trend — ${container_name}",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "id": 7,
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showLabels": true, "showTime": true },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{container_name=\"${container_name}\"}",
+          "refId": "A" }
+      ],
+      "title": "📋 Container Logs — ${container_name}",
+      "type": "logs"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "tags": ["docker", "container", "template"],
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "🐳 Template — Per-Container Analytics",
+  "uid": "docker-template-per-container",
+  "version": 1,
+  "style": "dark"
+}
+TEMPLATE_CONTAINER
+
+        chmod 644 "${DASH_DIR}/05-template-per-container-analytics.json"
+        chown grafana:grafana "${DASH_DIR}/05-template-per-container-analytics.json" 2>/dev/null || true
+    fi
+
+    # ── Create PM2 Analytics Dashboard ─────────────────────────────────────────
+    if [[ -f "${APP_DASH_DIR}/04-pm2-per-process-analytics.json" ]]; then
+        ok "✓ PM2 per-process analytics dashboard already exists — skipping"
+    else
+        ok "✓ Creating PM2 per-process analytics dashboard..."
+        cat > "${APP_DASH_DIR}/04-pm2-per-process-analytics.json" <<'PM2_ANALYTICS'
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "green", "value": 90 }
+          ] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * (sum(count_over_time({job=\"pm2\"}[5m])) - sum(count_over_time({job=\"pm2\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({job=\"pm2\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "✅ Success Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "red", "value": 10 }
+          ] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({job=\"pm2\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({job=\"pm2\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "❌ Error Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "yellow", "value": null },
+            { "color": "yellow", "value": 5 }
+          ] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({job=\"pm2\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({job=\"pm2\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "⚠️ Warning Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" } },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "list" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"pm2\"}[5m]))",
+          "refId": "A" }
+      ],
+      "title": "📊 Log Distribution",
+      "type": "piechart"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "table" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"pm2\"} |~ \"ERROR|Exception\" [5m])) by (name)",
+          "refId": "A" }
+      ],
+      "title": "Errors per Process",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "table" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"pm2\"} |~ \"WARN|WARNING\" [5m])) by (name)",
+          "refId": "A" }
+      ],
+      "title": "Warnings per Process",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "id": 7,
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showLabels": true, "showTime": true },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{job=\"pm2\"}",
+          "refId": "A" }
+      ],
+      "title": "📋 PM2 Process Logs",
+      "type": "logs"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "tags": ["pm2", "process", "loki"],
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "🔍 PM2 Per-Process Analytics",
+  "uid": "pm2-per-process-analytics",
+  "version": 1,
+  "style": "dark"
+}
+PM2_ANALYTICS
+
+        chmod 644 "${APP_DASH_DIR}/04-pm2-per-process-analytics.json"
+        chown grafana:grafana "${APP_DASH_DIR}/04-pm2-per-process-analytics.json" 2>/dev/null || true
+    fi
+
+    # ── Create PM2 Template Dashboard ──────────────────────────────────────────
+    if [[ -f "${APP_DASH_DIR}/05-template-pm2-per-process-analytics.json" ]]; then
+        ok "✓ PM2 per-process template dashboard already exists — skipping"
+    else
+        ok "✓ Creating PM2 per-process template dashboard..."
+        cat > "${APP_DASH_DIR}/05-template-pm2-per-process-analytics.json" <<'TEMPLATE_PM2'
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "description": "Template: Duplicate & set process_name for each PM2 app",
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "name": "process_name",
+        "type": "textbox",
+        "label": "⚙️ Process Name",
+        "description": "Set to your PM2 process name",
+        "value": "api-server",
+        "current": { "text": "api-server", "value": "api-server" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "green", "value": 90 }
+          ] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "id": 1,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * (sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m])) - sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "✅ Success Rate — ${process_name}",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null },
+            { "color": "red", "value": 10 }
+          ] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "id": 2,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "❌ Error Rate — ${process_name}",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "yellow", "value": null },
+            { "color": "yellow", "value": 5 }
+          ] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "id": 3,
+      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
+                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "100 * sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m])) + 1)",
+          "refId": "A" }
+      ],
+      "title": "⚠️ Warning Rate — ${process_name}",
+      "type": "gauge"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" } },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "id": 4,
+      "options": { "legend": { "displayMode": "list" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m]))",
+          "refId": "A" }
+      ],
+      "title": "📊 Log Count — ${process_name}",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "id": 5,
+      "options": { "legend": { "displayMode": "table" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"ERROR|Exception\" [5m]))",
+          "refId": "A" }
+      ],
+      "title": "❌ Error Trend — ${process_name}",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "id": 6,
+      "options": { "legend": { "displayMode": "table" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"WARN|WARNING\" [5m]))",
+          "refId": "A" }
+      ],
+      "title": "⚠️ Warning Trend — ${process_name}",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
+      "id": 7,
+      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showLabels": true, "showTime": true },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "{job=\"pm2\", name=\"${process_name}\"}",
+          "refId": "A" }
+      ],
+      "title": "📋 Process Logs — ${process_name}",
+      "type": "logs"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 38,
+  "tags": ["pm2", "process", "template"],
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "browser",
+  "title": "🔍 Template — Per-Process Analytics",
+  "uid": "pm2-template-per-process",
+  "version": 1,
+  "style": "dark"
+}
+TEMPLATE_PM2
+
+        chmod 644 "${APP_DASH_DIR}/05-template-pm2-per-process-analytics.json"
+        chown grafana:grafana "${APP_DASH_DIR}/05-template-pm2-per-process-analytics.json" 2>/dev/null || true
+    fi
+
+    # ── Finalize provisioning ────────────────────────────────────────────────────
+    ok "✓ All dashboards checked and provisioned"
     info ""
-    info "Dashboard templates (optional — for per-container monitoring):"
-    info "  • Duplicate any template dashboard in Grafana UI"
-    info "  • Edit 'container_name' variable for specific container"
-    info "  • Save with custom name"
+    info "📊 Grafana Dashboards:"
+    info "   Docker folder:"
+    info "     • 04-docker-per-container-analytics.json (aggregated)"
+    info "     • 05-template-per-container-analytics.json (template)"
+    info "   Applications folder:"
+    info "     • 04-pm2-per-process-analytics.json (aggregated)"
+    info "     • 05-template-pm2-per-process-analytics.json (template)"
 
     section_end
     return
