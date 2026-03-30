@@ -2686,7 +2686,7 @@ CREATE DATABASE IF NOT EXISTS pm2_logs;
 -- Main unified logs table (all types: PM2, system, nginx)
 CREATE TABLE IF NOT EXISTS pm2_logs.logs (
     timestamp DateTime DEFAULT now(),
-    log_type Enum('pm2', 'system', 'nginx', 'syslog', 'auth', 'kern', 'other') = 'other',
+    log_type Enum8('pm2', 'system', 'nginx', 'syslog', 'auth', 'kern', 'other') DEFAULT 'other',
     app_name String,
     log_level String,
     message String,
@@ -2720,7 +2720,7 @@ TTL timestamp + INTERVAL 2 DAY DELETE;
 -- System logs table (syslog, auth, kern)
 CREATE TABLE IF NOT EXISTS pm2_logs.system_logs (
     timestamp DateTime DEFAULT now(),
-    log_type Enum('syslog', 'auth', 'kern') = 'syslog',
+    log_type Enum8('syslog', 'auth', 'kern') DEFAULT 'syslog',
     hostname String DEFAULT 'localhost',
     facility String DEFAULT '',
     severity String DEFAULT '',
