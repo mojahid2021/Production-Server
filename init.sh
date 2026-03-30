@@ -1291,7 +1291,6 @@ Restart=always
 RestartSec=10
 StartLimitInterval=60s
 StartLimitBurst=3
-HealthCheck=/bin/bash -c 'curl -sf http://127.0.0.1:9090/-/healthy || exit 1'
 
 [Install]
 WantedBy=multi-user.target
@@ -1601,6 +1600,27 @@ GFDB
       ],
       "title": "PM2 App Instances",
       "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "Loki" },
+      "fieldConfig": {
+        "defaults": { "color": { "mode": "palette-classic" }, "unit": "short",
+          "custom": { "lineWidth": 2, "fillOpacity": 0 } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "id": 7,
+      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" },
+                   "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "datasource": { "type": "loki", "uid": "Loki" },
+          "expr": "sum by (job) (rate(count_over_time({job=\"pm2\"} |= \"ERROR\" or |= \"Exception\" or |= \"Error\" [5m])))",
+          "legendFormat": "{{job}} Errors/min",
+          "refId": "A" }
+      ],
+      "title": "⚠️ PM2 App Errors & Exceptions",
+      "description": "Error count per PM2 app — tracks ERROR, Exception, and Error log entries",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",
@@ -1610,9 +1630,9 @@ GFDB
   "timepicker": {},
   "timezone": "browser",
   "title": "⚙️ PM2 — Process Monitor",
-  "description": "Real-time PM2 app monitoring: status, CPU, memory, uptime, restart counts",
+  "description": "Real-time PM2 app monitoring: status, CPU, memory, uptime, restart counts, errors",
   "uid": "pm2-process-monitor",
-  "version": 2,
+  "version": 3,
   "style": "dark"
 }
 PM2DASH
@@ -2375,7 +2395,6 @@ compactor:
   working_directory: /var/lib/loki/compactor
   retention_enabled: true
   delete_request_store: filesystem
-  shared_store: filesystem
 
 analytics:
   reporting_enabled: false
@@ -2403,7 +2422,6 @@ RestartSec=10
 StartLimitInterval=60s
 StartLimitBurst=3
 LimitNOFILE=65536
-HealthCheck=/bin/bash -c 'curl -sf http://127.0.0.1:3100/ready || exit 1'
 
 [Install]
 WantedBy=multi-user.target
@@ -2483,16 +2501,12 @@ server:
   http_listen_port: 9080
   grpc_listen_port: 0
   log_level: warn
-  compression: gzip
 
 positions:
   filename: /var/lib/promtail/positions.yaml
 
 clients:
   - url: http://127.0.0.1:3100/loki/api/v1/push
-    max_retries: 3
-    min_backoff: 100ms
-    max_backoff: 10s
 
 scrape_configs:
 
@@ -2582,7 +2596,6 @@ RestartSec=10
 StartLimitInterval=60s
 StartLimitBurst=3
 LimitNOFILE=65536
-HealthCheck=/bin/bash -c 'curl -sf http://127.0.0.1:9080/loki/api/v1/tail || exit 1'
 
 [Install]
 WantedBy=multi-user.target
