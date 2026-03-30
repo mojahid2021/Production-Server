@@ -38,7 +38,7 @@ Connects Docker completely into the Prometheus + Grafana stack installed by `ini
 ```
 init.sh already installed:        docker.sh adds:
   Prometheus   :9090          ←     docker_engine metrics  :9323
-  Grafana      :3001          ←     cAdvisor metrics       :8080
+  Grafana      :13001          ←     cAdvisor metrics       :8080
   node_exporter:9100          ←     Loki* log backend      :3100
   Loki         :3100 (v7+)    ←     Promtail (Docker logs)
   Promtail     :9080 (v7+)    ←     5 Docker dashboards
@@ -60,7 +60,7 @@ init.sh already installed:        docker.sh adds:
 |---|---|---|
 | Ubuntu 20.04 / 22.04 / 24.04 | — | — |
 | Prometheus | `init.sh` | `/etc/prometheus/prometheus.yml` · `:9090` |
-| Grafana | `init.sh` | `/etc/grafana/provisioning` · `:3001` |
+| Grafana | `init.sh` | `/etc/grafana/provisioning` · `:13001` |
 | node_exporter | `init.sh` | `127.0.0.1:9100` |
 | Deploy user | `init.sh` | `/home/<username>` |
 | Loki *(optional)* | `init.sh` ≥ v7.0.0 | `127.0.0.1:3100` |
@@ -100,8 +100,8 @@ newgrp docker
 docker ps
 
 # Open Grafana dashboards (same SSH tunnel as init.sh)
-ssh -L 3001:localhost:3001 <username>@<server-ip>
-# Open: http://localhost:3001 → Dashboards → Docker
+ssh -L 13001:localhost:13001 <username>@<server-ip>
+# Open: http://localhost:13001 → Dashboards → Docker
 ```
 
 ---
@@ -155,9 +155,9 @@ ssh -L 3001:localhost:3001 <username>@<server-ip>
 |---|---|
 | `node_exporter` (`:9100`) | **Left untouched.** Already scraped by Prometheus — no duplicate job added. |
 | `prometheus.yml` | **Appended only.** `docker_engine` + `cadvisor` jobs added. Existing jobs preserved. Backup created. |
-| Grafana (`:3001`) | **Extended.** Loki datasource + Docker dashboards added. Existing Prometheus datasource and `System` folder untouched. |
+| Grafana (`:13001`) | **Extended.** Loki datasource + Docker dashboards added. Existing Prometheus datasource and `System` folder untouched. |
 | Deploy user | **Extended.** Added to `docker` group so they can run Docker without `sudo`. |
-| SSH tunnel (`:3001`) | **Same tunnel.** No new ports to forward — everything goes through the existing `:3001` tunnel from `init.sh`. |
+| SSH tunnel (`:13001`) | **Same tunnel.** No new ports to forward — everything goes through the existing `:13001` tunnel from `init.sh`. |
 | `server_status` script | **Compatible.** Docker containers will appear in `docker ps` output referenced by `server_status`. |
 
 ---
@@ -177,7 +177,7 @@ ssh -L 3001:localhost:3001 <username>@<server-ip>
 │  │  /etc/prometheus/prometheus.yml   cadvisor      :8080 ────┤ │   │
 │  │  (patched by docker.sh)                                   │ │   │
 │  │                            │                              │ │   │
-│  │  Grafana :3001 ◄───────────┘                              │ │   │
+│  │  Grafana :13001 ◄───────────┘                              │ │   │
 │  │  /etc/grafana/provisioning/         ◄── Loki :3100 ───────┘ │   │
 │  │  (datasource + dashboards added)                             │   │
 │  └──────────────────────────────────────────────────────────────┘   │
@@ -201,8 +201,8 @@ ssh -L 3001:localhost:3001 <username>@<server-ip>
 │                                                                    │
 └────────────────────────────────────────────────────────────────────┘
 
-Access:   ssh -L 3001:localhost:3001 <user>@<server>
-          http://localhost:3001  →  Dashboards  →  Docker
+Access:   ssh -L 13001:localhost:13001 <user>@<server>
+          http://localhost:13001  →  Dashboards  →  Docker
 ```
 
 ---
@@ -436,7 +436,7 @@ docker logs promtail --tail 20       # Promtail logs
 | 2 | **Never duplicates node_exporter** | init.sh's node_exporter job left 100% untouched |
 | 3 | **Safe prometheus.yml patching** | Backup created, promtool validates before reload, HTTP reload (zero downtime) |
 | 4 | **Same visual style as init.sh** | Identical colors, section headers, box borders — looks like one suite |
-| 5 | **Same SSH tunnel** | Uses the same `:3001` SSH tunnel from init.sh — no new ports to remember |
+| 5 | **Same SSH tunnel** | Uses the same `:13001` SSH tunnel from init.sh — no new ports to remember |
 | 6 | **Idempotent** | Safe to re-run — detects existing installs and upgrades cleanly |
 | 7 | **BuildKit on by default** | Faster, parallel, layer-cached builds without extra flags |
 | 8 | **Log rotation built-in** | daemon.json caps container logs at 20MB × 5 files — disk won't fill |
@@ -602,8 +602,8 @@ Yes. `docker.sh` only *appends* new scrape jobs to `prometheus.yml`. It creates 
 **Q: Can I re-run docker.sh after it's already been run?**
 Yes — it's idempotent. Docker will be upgraded if a newer version is available. Containers (`cadvisor`, `loki`, `promtail`) are stopped and recreated cleanly. Prometheus jobs are not duplicated (it checks first).
 
-**Q: Why is Grafana on port 3001 instead of 3000?**
-`init.sh` configures Grafana on `3001` to avoid conflicting with Node.js apps (which commonly run on port 3000). `docker.sh` uses the same port — no changes needed.
+**Q: Why is Grafana on port 13001 instead of 3000?**
+`init.sh` configures Grafana on `13001` to avoid conflicting with Node.js apps (which commonly run on port 3000). `docker.sh` uses the same port — no changes needed.
 
 **Q: How do I add more Docker dashboards?**
 Place any `.json` dashboard file in `/var/lib/grafana/dashboards/docker/` and it will auto-load within 30 seconds (the dashboard provider `updateIntervalSeconds` is set to 30). Or import via Grafana UI → Dashboards → Import → enter a grafana.com dashboard ID.
