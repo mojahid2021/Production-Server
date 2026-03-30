@@ -1120,9 +1120,9 @@ provision_dashboards() {
     # ── CONFLICT RESOLUTION ──────────────────────────────────────────────────
     # Verify that init.sh created its dashboard providers first
     local init_providers=0
-    [[ -f "${PROV_DIR}/system.yaml" ]] && ((init_providers++))
-    [[ -f "${PROV_DIR}/applications.yaml" ]] && ((init_providers++))
-    [[ -f "${PROV_DIR}/logs.yaml" ]] && ((init_providers++))
+    [[ -f "${PROV_DIR}/system.yaml" ]] && ((++init_providers))
+    [[ -f "${PROV_DIR}/applications.yaml" ]] && ((++init_providers))
+    [[ -f "${PROV_DIR}/logs.yaml" ]] && ((++init_providers))
     
     if (( init_providers == 0 )); then
         warn "No dashboard providers found from init.sh (system.yaml, applications.yaml, logs.yaml)"
@@ -1342,7 +1342,7 @@ DOCKER_ANALYTICS
           "thresholds": { "mode": "absolute", "steps": [
             { "color": "green", "value": null },
             { "color": "green", "value": 90 }
-          ] },
+          ] } },
         "overrides": []
       },
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
@@ -1365,7 +1365,7 @@ DOCKER_ANALYTICS
           "thresholds": { "mode": "absolute", "steps": [
             { "color": "red", "value": null },
             { "color": "red", "value": 10 }
-          ] },
+          ] } },
         "overrides": []
       },
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
@@ -1388,7 +1388,7 @@ DOCKER_ANALYTICS
           "thresholds": { "mode": "absolute", "steps": [
             { "color": "yellow", "value": null },
             { "color": "yellow", "value": 5 }
-          ] },
+          ] } },
         "overrides": []
       },
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
