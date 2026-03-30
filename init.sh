@@ -624,6 +624,52 @@ check_dependencies() {
             || warn "ufw not available — firewall step will be skipped."
     fi
 
+    # ── 14. ClickHouse (monitoring/analytics — step 09G) ─────────────────────
+    # Only checked/installed when monitoring is enabled (skipped with --no-mon).
+    # Installation follows the official ClickHouse docs:
+    #   https://clickhouse.com/docs/en/install#quick-install
+    # The repository method is used so future upgrades work via apt-get upgrade.
+    # ClickHouse uses one universal GPG key for both DEB and RPM packages.
+    if $SETUP_MON; then
+        if command -v clickhouse-client &>/dev/null; then
+            ok "clickhouse-client $(clickhouse-client --version 2>/dev/null | awk '{print $NF}') — ok"
+        else
+            info "ClickHouse not found — installing via official repository..."
+            # Ensure prerequisites for repo setup are present
+            DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                apt-transport-https ca-certificates curl gnupg 2>/dev/null | \
+                grep -E '(Setting up|already installed)' || true
+            # Download signing key to a temp file then dearmor (matches monitoring step pattern)
+            local _ch_key_tmp; _ch_key_tmp=$(mktemp /tmp/clickhouse-keyring.XXXXXX.gpg)
+            if curl --max-time 60 --connect-timeout 15 -fsSL \
+                    'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
+                    -o "$_ch_key_tmp" 2>/dev/null; then
+                local _gpg_err
+                _gpg_err=$(gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg \
+                    "$_ch_key_tmp" 2>&1) || warn "ClickHouse GPG dearmor failed: $_gpg_err"
+                rm -f "$_ch_key_tmp"
+                if [[ -s /usr/share/keyrings/clickhouse-keyring.gpg ]]; then
+                    # Add ClickHouse apt repository (latest stable channel)
+                    echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" \
+                        > /etc/apt/sources.list.d/clickhouse.list
+                    DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
+                    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                        clickhouse-server clickhouse-client 2>&1 | \
+                        grep -E '(Setting up|already installed)' || true
+                    command -v clickhouse-client &>/dev/null && ok "ClickHouse installed." \
+                        || warn "ClickHouse install failed — it will be retried in the monitoring step."
+                else
+                    warn "ClickHouse keyring not created — will be retried in the monitoring step."
+                fi
+            else
+                rm -f "$_ch_key_tmp"
+                warn "ClickHouse GPG key download failed — will be retried in the monitoring step."
+            fi
+        fi
+    else
+        info "ClickHouse — skipped (--no-mon)"
+    fi
+
     ok "Dependency check complete — all required tools are available."
 }
 
