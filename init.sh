@@ -442,7 +442,235 @@ preflight() {
         ok "SSH key validated."
     fi
 
+    check_dependencies
+
     section_end
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  DEPENDENCY CHECK + AUTO-INSTALL
+#  Checks every tool this script requires and installs missing ones up-front.
+#  Called from preflight() before any other work is performed.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+check_dependencies() {
+    info "Checking required tools and libraries..."
+
+    # ── Detect package manager ───────────────────────────────────────────────
+    local PKG_MGR=""
+    if   command -v apt-get &>/dev/null; then PKG_MGR="apt"
+    elif command -v dnf     &>/dev/null; then PKG_MGR="dnf"
+    elif command -v yum     &>/dev/null; then PKG_MGR="yum"
+    elif command -v pacman  &>/dev/null; then PKG_MGR="pacman"
+    else die "No supported package manager found (apt/dnf/yum/pacman). Cannot auto-install dependencies."
+    fi
+    info "Package manager: ${PKG_MGR}"
+
+    # ── Helper: install a package ────────────────────────────────────────────
+    _pkg_install() {
+        local pkg_apt="$1" pkg_dnf="${2:-$1}" pkg_pac="${3:-$1}"
+        case "$PKG_MGR" in
+            apt)    DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg_apt"  \
+                        2>&1 | grep -E '(Setting up|already installed)' || true ;;
+            dnf)    dnf     install -y "$pkg_dnf"  2>&1 | grep -E '(Installed|already)' || true ;;
+            yum)    yum     install -y "$pkg_dnf"  2>&1 | grep -E '(Installed|already)' || true ;;
+            pacman) pacman  -Sy --noconfirm "$pkg_pac" 2>&1 | grep -E '(installing|up to date)' || true ;;
+        esac
+    }
+
+    # Run apt-get update once if using apt and packages are likely stale
+    if [[ "$PKG_MGR" == "apt" ]]; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
+    fi
+
+    # ── 1. bash >= 4 (associative arrays, [[ ]], etc.) ───────────────────────
+    local bash_ver="${BASH_VERSINFO[0]:-0}"
+    if (( bash_ver < 4 )); then
+        die "Bash 4+ required (found bash ${bash_ver}). Install a newer bash first."
+    fi
+    ok "bash ${BASH_VERSION} — ok"
+
+    # ── 2. curl or wget (NVM download, Prometheus/node_exporter/Loki) ────────
+    if command -v curl &>/dev/null; then
+        ok "curl $(curl --version 2>/dev/null | head -1 | awk '{print $2}') — ok"
+    elif command -v wget &>/dev/null; then
+        ok "wget $(wget --version 2>/dev/null | head -1 | awk '{print $3}') — ok"
+    else
+        warn "Neither curl nor wget found — installing curl..."
+        _pkg_install curl curl curl
+        command -v curl &>/dev/null && ok "curl installed." \
+            || die "Failed to install curl. Install it manually and re-run."
+    fi
+
+    # ── 3. openssl (password hashing, certificate generation) ────────────────
+    if command -v openssl &>/dev/null; then
+        ok "openssl $(openssl version 2>/dev/null | awk '{print $2}') — ok"
+    else
+        warn "openssl not found — installing..."
+        _pkg_install openssl openssl openssl
+        command -v openssl &>/dev/null && ok "openssl installed." \
+            || die "Failed to install openssl. Install it manually and re-run."
+    fi
+
+    # ── 4. tar (extract Prometheus, node_exporter, Promtail archives) ────────
+    if command -v tar &>/dev/null; then
+        ok "tar — ok"
+    else
+        warn "tar not found — installing..."
+        _pkg_install tar tar tar
+        command -v tar &>/dev/null && ok "tar installed." \
+            || die "Failed to install tar. Install it manually and re-run."
+    fi
+
+    # ── 5. unzip (extract Loki archive) ──────────────────────────────────────
+    if command -v unzip &>/dev/null; then
+        ok "unzip — ok"
+    else
+        warn "unzip not found — installing..."
+        _pkg_install unzip unzip unzip
+        command -v unzip &>/dev/null && ok "unzip installed." \
+            || warn "unzip not available — Loki install may fall back or fail."
+    fi
+
+    # ── 6. systemctl / service (service management throughout the script) ─────
+    if command -v systemctl &>/dev/null; then
+        ok "systemctl — ok"
+    elif command -v service &>/dev/null; then
+        ok "service (SysV init) — ok"
+    else
+        warn "No systemctl or service found — service management steps may require manual intervention."
+    fi
+
+    # ── 7. cron / crontab (log rotation schedules, acme.sh renewal) ──────────
+    local cron_ok=false
+    for _cmd in crontab crond cron; do
+        command -v "$_cmd" &>/dev/null && { cron_ok=true; break; }
+    done
+    if $cron_ok; then
+        ok "cron — ok"
+    else
+        warn "cron not found — installing..."
+        case "$PKG_MGR" in
+            apt)    apt-get install -y cron && systemctl enable cron  2>/dev/null || true ;;
+            dnf|yum) ${PKG_MGR} install -y cronie && systemctl enable crond 2>/dev/null || true ;;
+            pacman) pacman -Sy --noconfirm cronie && systemctl enable cronie 2>/dev/null || true ;;
+        esac
+        command -v crontab &>/dev/null && ok "cron installed." \
+            || warn "Could not install cron — some scheduled tasks may not run automatically."
+    fi
+
+    # ── 8. coreutils: awk, grep, sed, cut, date, tee, sort ───────────────────
+    local core_ok=true
+    for _tool in awk grep sed cut date tee sort; do
+        if ! command -v "$_tool" &>/dev/null; then
+            warn "Missing coreutil: ${_tool}"
+            core_ok=false
+        fi
+    done
+    if $core_ok; then
+        ok "coreutils (awk, grep, sed, cut, date, tee, sort) — ok"
+    else
+        warn "Some coreutils missing — installing..."
+        _pkg_install coreutils coreutils coreutils
+    fi
+
+    # ── 9. mktemp (used for temp files throughout the script) ────────────────
+    if command -v mktemp &>/dev/null; then
+        ok "mktemp — ok"
+    else
+        warn "mktemp not found — installing util-linux..."
+        _pkg_install util-linux util-linux util-linux
+        command -v mktemp &>/dev/null && ok "mktemp installed." \
+            || warn "mktemp not available — some temp-file operations may fail."
+    fi
+
+    # ── 10. jq (JSON parsing — used in monitoring config) ────────────────────
+    if command -v jq &>/dev/null; then
+        ok "jq $(jq --version 2>/dev/null) — ok"
+    else
+        info "jq not found — installing (used for JSON config processing)..."
+        _pkg_install jq jq jq
+        command -v jq &>/dev/null && ok "jq installed." \
+            || warn "jq not available — JSON config steps will use fallback methods."
+    fi
+
+    # ── 11. logrotate (PM2 log rotation — step 13) ───────────────────────────
+    if command -v logrotate &>/dev/null; then
+        ok "logrotate — ok"
+    else
+        info "logrotate not found — installing (required for log rotation)..."
+        _pkg_install logrotate logrotate logrotate
+        command -v logrotate &>/dev/null && ok "logrotate installed." \
+            || warn "logrotate not available — log rotation will rely on PM2 module only."
+    fi
+
+    # ── 12. fail2ban (SSH brute-force protection — step 11) ──────────────────
+    if command -v fail2ban-server &>/dev/null; then
+        ok "fail2ban — ok"
+    else
+        info "fail2ban not found — installing (SSH brute-force protection)..."
+        _pkg_install fail2ban fail2ban fail2ban
+        command -v fail2ban-server &>/dev/null && ok "fail2ban installed." \
+            || warn "fail2ban not available — SSH brute-force protection will be skipped."
+    fi
+
+    # ── 13. ufw (firewall — step 12) ─────────────────────────────────────────
+    if command -v ufw &>/dev/null; then
+        ok "ufw — ok (firewall ready)"
+    else
+        info "ufw not found — installing (firewall management)..."
+        _pkg_install ufw ufw ufw
+        command -v ufw &>/dev/null && ok "ufw installed." \
+            || warn "ufw not available — firewall step will be skipped."
+    fi
+
+    # ── 14. ClickHouse (monitoring/analytics — step 09G) ─────────────────────
+    # Only checked/installed when monitoring is enabled (skipped with --no-mon).
+    # Installation follows the official ClickHouse docs:
+    #   https://clickhouse.com/docs/en/install#quick-install
+    # The repository method is used so future upgrades work via apt-get upgrade.
+    # ClickHouse uses one universal GPG key for both DEB and RPM packages.
+    if $SETUP_MON; then
+        if command -v clickhouse-client &>/dev/null; then
+            ok "clickhouse-client $(clickhouse-client --version 2>/dev/null | awk '{print $NF}') — ok"
+        else
+            info "ClickHouse not found — installing via official repository..."
+            # Ensure prerequisites for repo setup are present
+            DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                apt-transport-https ca-certificates curl gnupg 2>/dev/null | \
+                grep -E '(Setting up|already installed)' || true
+            # Download signing key to a temp file then dearmor (matches monitoring step pattern)
+            local _ch_key_tmp; _ch_key_tmp=$(mktemp /tmp/clickhouse-keyring.XXXXXX.gpg)
+            if curl --max-time 60 --connect-timeout 15 -fsSL \
+                    'https://packages.clickhouse.com/rpm/lts/repodata/repomd.xml.key' \
+                    -o "$_ch_key_tmp" 2>/dev/null; then
+                local _gpg_err
+                _gpg_err=$(gpg --dearmor -o /usr/share/keyrings/clickhouse-keyring.gpg \
+                    "$_ch_key_tmp" 2>&1) || warn "ClickHouse GPG dearmor failed: $_gpg_err"
+                rm -f "$_ch_key_tmp"
+                if [[ -s /usr/share/keyrings/clickhouse-keyring.gpg ]]; then
+                    # Add ClickHouse apt repository (latest stable channel)
+                    echo "deb [signed-by=/usr/share/keyrings/clickhouse-keyring.gpg] https://packages.clickhouse.com/deb stable main" \
+                        > /etc/apt/sources.list.d/clickhouse.list
+                    DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
+                    DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                        clickhouse-server clickhouse-client 2>&1 | \
+                        grep -E '(Setting up|already installed)' || true
+                    command -v clickhouse-client &>/dev/null && ok "ClickHouse installed." \
+                        || warn "ClickHouse install failed — it will be retried in the monitoring step."
+                else
+                    warn "ClickHouse keyring not created — will be retried in the monitoring step."
+                fi
+            else
+                rm -f "$_ch_key_tmp"
+                warn "ClickHouse GPG key download failed — will be retried in the monitoring step."
+            fi
+        fi
+    else
+        info "ClickHouse — skipped (--no-mon)"
+    fi
+
+    ok "Dependency check complete — all required tools are available."
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
