@@ -941,16 +941,6 @@ SECHDR
     # Bad bots
     [[ "$FEAT_BLOCK_BOTS" == "true" ]] && printf '\n    if ($bad_bot) { return 444; }\n'
 
-    # Attack patterns
-    [[ "$FEAT_BLOCK_ATTACKS" == "true" ]] && cat <<'ATK'
-
-    if ($request_uri ~* "(union.*select|select.*from|insert.*into|drop.*table|exec\()") { return 403; }
-    if ($request_uri ~* "(\.\.\/|%2e%2e%2f|%252e%252e|\.\.%2f)") { return 403; }
-    if ($request_uri ~* "(<script|javascript:|vbscript:|onload=|onerror=|onclick=)") { return 403; }
-    if ($request_uri ~* "(etc/passwd|etc/shadow|proc/self|boot\.ini)") { return 403; }
-    if ($request_uri ~* "(base64_decode|eval\(|system\(|passthru\(|shell_exec\()") { return 403; }
-ATK
-
     [[ "$FEAT_RATE_LIMIT" == "true" ]] && {
       printf '\n    limit_req  zone=%s_req burst=%s nodelay;\n' "${DOMAIN//./_}" "$RATE_LIMIT_BURST"
       printf '    limit_req_status 429;\n'
@@ -1049,6 +1039,11 @@ SENS
         proxy_read_timeout    90s;
         proxy_connect_timeout 10s;
         proxy_buffering       off;
+        if (\$request_uri ~* "(union.*select|select.*from|insert.*into|drop.*table|exec\()") { return 403; }
+        if (\$request_uri ~* "(\.\.\/|%2e%2e%2f|%252e%252e|\.\.%2f)") { return 403; }
+        if (\$request_uri ~* "(<script|javascript:|vbscript:|onload=|onerror=|onclick=)") { return 403; }
+        if (\$request_uri ~* "(etc/passwd|etc/shadow|proc/self|boot\.ini)") { return 403; }
+        if (\$request_uri ~* "(base64_decode|eval\(|system\(|passthru\(|shell_exec\()") { return 403; }
 PROXY
         [[ "$FEAT_WEBSOCKET" == "true" ]] && {
           echo "        proxy_set_header   Upgrade    \$http_upgrade;"
