@@ -1015,11 +1015,11 @@ SENS
       local uloc="${UPLOAD_DIR#${ROOT_DIR}}"
       [[ -z "$uloc" ]] && uloc="/uploads"
       echo ""
-      echo "    location ~* ^${uloc}/ {"
+      echo "    location ^~ ${uloc}/ {"
       echo "        location ~* \.(php|php[3-9]|phtml|pl|py|jsp|asp|sh|cgi)\$ { deny all; return 403; }"
       [[ -n "$UPLOAD_ALLOWED_TYPES" ]] && {
         echo "        location ~* \.(${UPLOAD_ALLOWED_TYPES})\$ { try_files \$uri =404; }"
-        echo "        location / { return 403; }"
+        echo "        deny all;"
       }
       echo "    }"
     fi
