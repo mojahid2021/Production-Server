@@ -5,26 +5,22 @@
 # ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║                                                                              ║
 # ║  COMPANION TO: init.sh (Node.js Production Server Provisioner)               ║
-# ║  Requires Prometheus + Grafana already installed by init.sh                  ║
+# ║  Integrates with Cockpit (Web Console) + VictoriaMetrics (Metrics)           ║
 # ║                                                                              ║
 # ║  WHAT THIS DOES                                                              ║
-# ║  01. Preflight — checks OS, root, init.sh components                        ║
+# ║  01. Preflight — checks OS, root, deploy user, and monitoring components     ║
 # ║  02. Install Docker CE (latest stable) + CLI + containerd + Buildx           ║
 # ║  03. Install Docker Compose v2 plugin                                        ║
-# ║  04. Configure optimized daemon.json (BuildKit, log rotation, live-restore)  ║
+# ║  04. Configure optimized daemon.json (BuildKit, log rotation, metrics)       ║
 # ║  05. Add deploy user to docker group (no sudo needed)                        ║
 # ║  06. Install ecosystem tools: ctop, Lazydocker, Docker Scout                 ║
 # ║  07. Enable bash completion for docker & compose                              ║
-# ║  08. Enable Docker daemon metrics endpoint (:9323) for Prometheus             ║
-# ║  09. Deploy cAdvisor container — per-container CPU/RAM/net/disk metrics       ║
-# ║  10. Deploy Loki container — Docker log aggregation backend (:3100)           ║
-# ║  11. Deploy Promtail container — reads /var/lib/docker/containers logs        ║
-# ║  12. Patch /etc/prometheus/prometheus.yml — add docker_engine + cadvisor     ║
-# ║      NOTE: node_exporter scrape already exists from init.sh — not touched    ║
-# ║  13. Provision Loki datasource in Grafana (/etc/grafana/provisioning)         ║
-# ║  14. Download & provision Docker dashboards → /var/lib/grafana/dashboards/   ║
-# ║  15. Reload Prometheus + Grafana — no restarts, live reload                  ║
-# ║  16. Smoke test + full verification + summary                                 ║
+# ║  08. Enable Docker daemon metrics endpoint (:9323)                           ║
+# ║  09. Cockpit Container Integration — view & manage containers in Cockpit GUI ║
+# ║  10. Deploy cAdvisor container — per-container CPU/RAM/net/disk metrics (:8080)║
+# ║  11. Patch monitoring scrapes (VictoriaMetrics / Prometheus)                 ║
+# ║  12. Smoke test + full verification                                          ║
+# ║  13. Summary & quick reference                                               ║
 # ║                                                                              ║
 # ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║                                                                              ║
@@ -48,46 +44,22 @@ readonly SCRIPT_VERSION="1.0.0"
 readonly LOG_FILE="/var/log/docker_provision.log"
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# ── init.sh-installed component paths (do not change) ─────────────────────────
-readonly PROMETHEUS_CONFIG="/etc/prometheus/prometheus.yml"   # written by init.sh
-readonly PROMETHEUS_URL="http://127.0.0.1:9090"               # bound by init.sh
-readonly GRAFANA_PROVISIONING="/etc/grafana/provisioning"     # init.sh standard path
-readonly GRAFANA_DASH_DIR="/var/lib/grafana/dashboards"       # init.sh dashboard dir
-readonly GRAFANA_URL="http://127.0.0.1:13001"                 # init.sh configures port 13001
+# ── Monitoring component paths ────────────────────────────────────────────────
+readonly VICTORIAMETRICS_CONFIG="/etc/victoriametrics/scrape.yml"
+readonly VICTORIAMETRICS_URL="http://127.0.0.1:8428"
+readonly COCKPIT_URL="http://127.0.0.1:9090"
+readonly PROMETHEUS_CONFIG="/etc/prometheus/prometheus.yml"   # fallback
+readonly PROMETHEUS_URL="http://127.0.0.1:9090"               # fallback
 
 # ── Docker monitoring stack ────────────────────────────────────────────────────
-readonly MONITORING_DIR="/opt/docker-monitoring"
 readonly DOCKER_METRICS_PORT=9323      # Docker daemon metrics
 readonly CADVISOR_PORT=8080            # Per-container metrics
-readonly LOKI_PORT=3100                # Log backend
-readonly PROMTAIL_STATUS_PORT=9080        # Promtail health endpoint (standalone Docker network)
-readonly PROMTAIL_DOCKER_STATUS_PORT=9081 # Promtail-docker health endpoint (host-network mode — avoids clash with native Promtail on :9080)
-# node_exporter :9100 is already running from init.sh — we never touch it
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  COLORS (identical to init.sh)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-if [[ -t 1 ]] && tput colors &>/dev/null && (( $(tput colors) >= 8 )); then
-    R=$'\033[0m'  BOLD=$'\033[1m'  DIM=$'\033[2m'
-    GRN=$'\033[38;5;82m'   BLU=$'\033[38;5;33m'   CYN=$'\033[38;5;45m'
-    YLW=$'\033[38;5;220m'
-    WHT=$'\033[38;5;255m'  GRY=$'\033[38;5;244m'  RED=$'\033[38;5;196m'
-    TICK="${GRN}✔${R}"  CROSS="${RED}✘${R}"  WARN_IC="${YLW}⚠${R}"
-    ARROW="${CYN}›${R}"
-else
-    R='' BOLD='' DIM='' GRN='' BLU='' CYN='' YLW='' WHT='' GRY='' RED=''
-    TICK='[OK]' CROSS='[ERR]' WARN_IC='[WARN]' ARROW='->'
-fi
-
-readonly HR2="════════════════════════════════════════════════════════════════════════════"
-readonly HR="────────────────────────────────────────────────────────────────────────────"
 
 # Service state tracking
+COCKPIT_EXISTS=false
+VM_EXISTS=false
 PROM_EXISTS=false
 GRAFANA_EXISTS=false
-LOKI_EXISTS=false
-PROMTAIL_EXISTS=false
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  OUTPUT (identical to init.sh)
@@ -107,29 +79,29 @@ section_end() { echo -e "  ${BLU}${DIM}└${HR:0:60}${R}"; }
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 detect_existing_services() {
+    COCKPIT_EXISTS=false
+    VM_EXISTS=false
     PROM_EXISTS=false
     GRAFANA_EXISTS=false
-    LOKI_EXISTS=false
-    PROMTAIL_EXISTS=false
 
-    # Check Prometheus
+    # Check Cockpit
+    if systemctl is-active --quiet cockpit.socket 2>/dev/null || command -v cockpit-bridge &>/dev/null; then
+        COCKPIT_EXISTS=true
+    fi
+
+    # Check VictoriaMetrics
+    if systemctl is-active --quiet victoriametrics 2>/dev/null || [[ -f "$VICTORIAMETRICS_CONFIG" ]]; then
+        VM_EXISTS=true
+    fi
+
+    # Check Prometheus (legacy fallback)
     if systemctl is-active --quiet prometheus 2>/dev/null || [[ -f "$PROMETHEUS_CONFIG" ]]; then
         PROM_EXISTS=true
     fi
 
-    # Check Grafana
+    # Check Grafana (legacy fallback)
     if systemctl is-active --quiet grafana-server 2>/dev/null || command -v grafana-server &>/dev/null; then
         GRAFANA_EXISTS=true
-    fi
-
-    # Check Loki (native service installed by init.sh)
-    if systemctl is-active --quiet loki 2>/dev/null || command -v loki &>/dev/null; then
-        LOKI_EXISTS=true
-    fi
-
-    # Check Promtail
-    if systemctl is-active --quiet promtail 2>/dev/null || command -v promtail &>/dev/null; then
-        PROMTAIL_EXISTS=true
     fi
 }
 
@@ -140,14 +112,17 @@ detect_existing_services() {
 parse_args() {
     DEPLOY_USER="${SUDO_USER:-}"   # default: the user who ran sudo
     SETUP_MON=true                  # --no-mon disables monitoring integration
-    SETUP_LOKI=true                 # --no-loki disables Loki/Promtail
+    SETUP_LOKI=false                # Loki/Promtail disabled by default
+    SETUP_CADVISOR=false            # default false (saves ~50-70MB RAM; --with-cadvisor to enable)
     NATIVE_LOKI=false               # set to true at runtime when init.sh's native Loki is detected
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -u)        DEPLOY_USER="${2:?}"; shift 2 ;;
-            --no-mon)  SETUP_MON=false;      shift ;;
-            --no-loki) SETUP_LOKI=false;     shift ;;
+            -u)               DEPLOY_USER="${2:?}"; shift 2 ;;
+            --no-mon)         SETUP_MON=false;      shift ;;
+            --no-loki)        SETUP_LOKI=false;     shift ;;
+            --with-cadvisor)  SETUP_CADVISOR=true;  shift ;;
+            --no-cadvisor)    SETUP_CADVISOR=false; shift ;;
             -h|--help) usage ;;
             *) die "Unknown option: '$1'. Use -h for help." ;;
         esac
@@ -166,11 +141,11 @@ usage() {
     echo ""
     echo -e "  ${BOLD}${WHT}Usage${R}"
     echo -e "  ${GRY}${HR:0:60}${R}"
-    echo -e "    ${CYN}sudo ./docker.sh${R}               ${GRY}# run everything (recommended)${R}"
-    echo -e "    ${CYN}sudo ./docker.sh -u <user>${R}     ${GRY}# specify deploy username${R}"
-    echo -e "    ${CYN}sudo ./docker.sh --no-mon${R}      ${GRY}# skip monitoring integration${R}"
-    echo -e "    ${CYN}sudo ./docker.sh --no-loki${R}     ${GRY}# skip Loki/Promtail log pipeline${R}"
-    echo -e "    ${CYN}sudo ./docker.sh -h${R}            ${GRY}# show this help${R}"
+    echo -e "    ${CYN}sudo ./docker.sh${R}                 ${GRY}# run lean stack (recommended, saves 70MB RAM)${R}"
+    echo -e "    ${CYN}sudo ./docker.sh -u <user>${R}       ${GRY}# specify deploy username${R}"
+    echo -e "    ${CYN}sudo ./docker.sh --with-cadvisor${R} ${GRY}# enable cAdvisor container (:8080)${R}"
+    echo -e "    ${CYN}sudo ./docker.sh --no-mon${R}        ${GRY}# skip monitoring integration${R}"
+    echo -e "    ${CYN}sudo ./docker.sh -h${R}              ${GRY}# show this help${R}"
     echo ""
     exit 0
 }
@@ -186,10 +161,10 @@ show_banner() {
     printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
             "  🐳  docker.sh  —  Docker CE + Full Monitoring Integration  v${SCRIPT_VERSION}"
     printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Docker · Compose v2 · BuildKit · cAdvisor · Loki · Grafana · Prometheus"
+            "  Docker · Compose v2 · BuildKit · cAdvisor · Cockpit · VictoriaMetrics"
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
     printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Companion to init.sh — integrates with your existing Prometheus + Grafana"
+            "  Companion to init.sh — integrates with Cockpit & VictoriaMetrics"
     printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
             "  node_exporter already running from init.sh — will NOT be touched"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
@@ -215,9 +190,20 @@ preflight() {
 
     # Resolve deploy user
     if [[ -z "${DEPLOY_USER}" || "${DEPLOY_USER}" == "root" ]]; then
-        # Try to find the user created by init.sh by checking /home
+        # Check canonical server metadata from init.sh first
+        if [[ -f /etc/production-server.conf ]]; then
+            local conf_user
+            conf_user=$(grep -E '^DEPLOY_USER=' /etc/production-server.conf 2>/dev/null | cut -d'=' -f2 | tr -d '"' || true)
+            if [[ -n "$conf_user" ]] && id "$conf_user" &>/dev/null; then
+                DEPLOY_USER="$conf_user"
+                ok "Deploy user connected from init.sh metadata: ${WHT}${BOLD}${DEPLOY_USER}${R}"
+            fi
+        fi
+    fi
+    if [[ -z "${DEPLOY_USER}" || "${DEPLOY_USER}" == "root" ]]; then
+        # Fallback: check /home
         local found_user
-        found_user=$(ls /home 2>/dev/null | head -1 || true)
+        found_user=$(ls /home 2>/dev/null | grep -v 'lost+found' | head -1 || true)
         if [[ -n "${found_user}" ]]; then
             DEPLOY_USER="${found_user}"
             warn "No user specified. Detected: '${DEPLOY_USER}' — use -u <name> to override."
@@ -232,42 +218,27 @@ preflight() {
     detect_existing_services
     
     # Report what's already installed
-    if $PROM_EXISTS; then
-        ok "Prometheus already exists — will integrate with existing instance."
+    if $COCKPIT_EXISTS; then
+        ok "Cockpit detected — will integrate container management (cockpit-podman)."
     fi
-    if $GRAFANA_EXISTS; then
-        ok "Grafana already exists — will reuse and add dashboards."
-    fi
-    if $LOKI_EXISTS; then
-        ok "Loki already exists — will integrate with it."
-    fi
-    if $PROMTAIL_EXISTS; then
-        ok "Promtail already exists — will use existing Docker logs component."
+    if $VM_EXISTS; then
+        ok "VictoriaMetrics detected — will configure Docker & cAdvisor scrape targets."
+    elif $PROM_EXISTS; then
+        ok "Legacy Prometheus detected — will configure scrape targets."
     fi
 
-    # Check init.sh components if monitoring is requested
+    # Check monitoring targets if monitoring is requested
     if $SETUP_MON; then
-        if [[ ! -f "${PROMETHEUS_CONFIG}" ]]; then
-            warn "Prometheus config not found at ${PROMETHEUS_CONFIG}."
-            warn "Run init.sh first, or use --no-mon to skip monitoring integration."
-            warn "Continuing with Docker install only — monitoring steps will be skipped."
-            SETUP_MON=false
+        if [[ -f "${VICTORIAMETRICS_CONFIG}" ]]; then
+            ok "VictoriaMetrics scrape config found: ${VICTORIAMETRICS_CONFIG}"
+        elif [[ -f "${PROMETHEUS_CONFIG}" ]]; then
+            ok "Prometheus scrape config found: ${PROMETHEUS_CONFIG}"
         else
-            ok "Prometheus config found: ${PROMETHEUS_CONFIG}"
+            info "No existing scrape config found (VictoriaMetrics/Prometheus). Metrics endpoints will still be live."
         fi
 
-        if [[ ! -d "${GRAFANA_PROVISIONING}" ]]; then
-            warn "Grafana provisioning dir not found at ${GRAFANA_PROVISIONING}."
-            warn "Monitoring integration will be skipped."
-            SETUP_MON=false
-        else
-            ok "Grafana provisioning dir found: ${GRAFANA_PROVISIONING}"
-        fi
-
-        if systemctl is-active --quiet node_exporter 2>/dev/null; then
-            ok "node_exporter already running (init.sh) — will not be reinstalled."
-        else
-            warn "node_exporter not detected. Run init.sh first for full monitoring."
+        if $COCKPIT_EXISTS || $VM_EXISTS; then
+            ok "Host monitoring active (Cockpit / VictoriaMetrics) — no node_exporter needed."
         fi
     fi
 
@@ -284,9 +255,6 @@ preflight() {
 
 check_dependencies() {
     info "Checking required tools and libraries..."
-
-    # Always apt on Ubuntu/Debian (already validated above)
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq 2>/dev/null || true
 
     # ── Helper ───────────────────────────────────────────────────────────────
     _pkg_install() {
@@ -340,7 +308,7 @@ check_dependencies() {
         ok "ca-certificates installed."
     fi
 
-    # ── 6. jq (JSON config parsing — Prometheus/Grafana patching) ────────────
+    # ── 6. jq (JSON config parsing — Docker daemon / monitoring config) ──────
     if command -v jq &>/dev/null; then
         ok "jq $(jq --version 2>/dev/null) — ok"
     else
@@ -419,12 +387,21 @@ remove_old_docker() {
 install_prerequisites() {
     section "03" "System Prerequisites"
 
-    apt-get update -qq
-    apt-get install -y \
-        ca-certificates curl gnupg lsb-release \
-        apt-transport-https software-properties-common \
-        wget git jq make bash-completion
-    ok "Prerequisites installed (curl, gnupg, jq, lsb-release, etc.)"
+    local needed=()
+    for pkg in ca-certificates curl gnupg lsb-release apt-transport-https software-properties-common wget git jq make bash-completion; do
+        if ! dpkg -s "$pkg" &>/dev/null; then
+            needed+=("$pkg")
+        fi
+    done
+
+    if [[ ${#needed[@]} -gt 0 ]]; then
+        info "Installing missing prerequisites: ${needed[*]}..."
+        apt-get update -qq
+        apt-get install -y --no-install-recommends "${needed[@]}"
+        ok "Prerequisites installed: ${needed[*]}"
+    else
+        ok "All prerequisites satisfied by init.sh (curl, gnupg, jq, git, etc.) — skipped redundant apt execution."
+    fi
 
     section_end
 }
@@ -577,39 +554,55 @@ install_ecosystem_tools() {
     [[ "${ARCH}" == "amd64" ]] && ARCH="amd64" || ARCH="arm64"
 
     # ── ctop — container resource monitor ─────────────────────────────────────
-    info "Installing ctop (live container resource monitor)..."
-    local CTOP_VER
-    CTOP_VER=$(curl -sf https://api.github.com/repos/bcicen/ctop/releases/latest \
-        | jq -r '.tag_name' 2>/dev/null || echo "v0.7.7")
-    curl -fsSL \
-        "https://github.com/bcicen/ctop/releases/download/${CTOP_VER}/ctop-${CTOP_VER#v}-linux-${ARCH}" \
-        -o /usr/local/bin/ctop 2>/dev/null \
-        && chmod +x /usr/local/bin/ctop \
-        && ok "ctop ${CTOP_VER} installed → /usr/local/bin/ctop" \
-        || warn "ctop install skipped (network issue) — install manually from github.com/bcicen/ctop"
+    if command -v ctop &>/dev/null; then
+        ok "ctop already installed → /usr/local/bin/ctop"
+    else
+        info "Installing ctop (live container resource monitor)..."
+        local CTOP_VER
+        CTOP_VER=$(curl -sf https://api.github.com/repos/bcicen/ctop/releases/latest \
+            | jq -r '.tag_name' 2>/dev/null || echo "v0.7.7")
+        curl -fsSL \
+            "https://github.com/bcicen/ctop/releases/download/${CTOP_VER}/ctop-${CTOP_VER#v}-linux-${ARCH}" \
+            -o /usr/local/bin/ctop 2>/dev/null \
+            && chmod +x /usr/local/bin/ctop \
+            && ok "ctop ${CTOP_VER} installed → /usr/local/bin/ctop" \
+            || warn "ctop install skipped (network issue) — install manually from github.com/bcicen/ctop"
+    fi
 
     # ── Lazydocker — full terminal UI ─────────────────────────────────────────
-    info "Installing Lazydocker (interactive Docker TUI)..."
-    curl -fsSL \
-        https://raw.githubusercontent.com/jesseduffield/lazydocker/master/scripts/install_update_linux.sh \
-        | bash 2>/dev/null \
-        && ok "Lazydocker installed." \
-        || warn "Lazydocker install skipped — github.com/jesseduffield/lazydocker"
+    if command -v lazydocker &>/dev/null; then
+        ok "Lazydocker already installed."
+    else
+        info "Installing Lazydocker (interactive Docker TUI)..."
+        curl -fsSL \
+            https://raw.githubusercontent.com/jesseduffield/lazydocker/master/scripts/install_update_linux.sh \
+            | bash 2>/dev/null \
+            && ok "Lazydocker installed." \
+            || warn "Lazydocker install skipped — github.com/jesseduffield/lazydocker"
+    fi
 
     # ── Docker Scout — vulnerability scanner ──────────────────────────────────
-    info "Installing Docker Scout CLI (vulnerability scanner)..."
-    curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh \
-        | sh -s -- -b /usr/local/bin 2>/dev/null \
-        && ok "Docker Scout CLI installed → docker scout quickview <image>" \
-        || warn "Docker Scout install skipped — docs.docker.com/scout"
+    if command -v docker-scout &>/dev/null || docker scout version &>/dev/null 2>&1; then
+        ok "Docker Scout CLI already installed."
+    else
+        info "Installing Docker Scout CLI (vulnerability scanner)..."
+        curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh \
+            | sh -s -- -b /usr/local/bin 2>/dev/null \
+            && ok "Docker Scout CLI installed → docker scout quickview <image>" \
+            || warn "Docker Scout install skipped — docs.docker.com/scout"
+    fi
 
     # ── Bash completion ────────────────────────────────────────────────────────
-    info "Enabling bash completion for docker & docker compose..."
-    curl -fsSL \
-        "https://raw.githubusercontent.com/docker/cli/master/contrib/completion/bash/docker" \
-        -o /etc/bash_completion.d/docker 2>/dev/null \
-        && ok "Bash completion enabled for docker and docker compose." \
-        || warn "Bash completion download skipped (network issue)."
+    if [[ -f /etc/bash_completion.d/docker ]]; then
+        ok "Bash completion already configured for docker."
+    else
+        info "Enabling bash completion for docker & docker compose..."
+        curl -fsSL \
+            "https://raw.githubusercontent.com/docker/cli/master/contrib/completion/bash/docker" \
+            -o /etc/bash_completion.d/docker 2>/dev/null \
+            && ok "Bash completion enabled for docker and docker compose." \
+            || warn "Bash completion download skipped (network issue)."
+    fi
 
     section_end
 }
@@ -623,6 +616,15 @@ deploy_cadvisor() {
 
     # Stop + remove existing instance if any
     docker rm -f cadvisor 2>/dev/null || true
+
+    if ! $SETUP_CADVISOR; then
+        ok "cAdvisor container disabled (ultra-lean profile — saves ~50–70 MB RAM)."
+        info "Docker daemon native metrics are exposed on 127.0.0.1:${DOCKER_METRICS_PORT}/metrics."
+        info "Container management, status, and logs are accessible directly in Cockpit (:9090)."
+        info "To enable cAdvisor if needed, re-run with: sudo ./docker.sh --with-cadvisor"
+        section_end
+        return
+    fi
 
     docker run -d \
         --name cadvisor \
@@ -663,1193 +665,101 @@ deploy_cadvisor() {
 #  10 — LOKI + PROMTAIL — Docker log aggregation
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-deploy_loki_promtail() {
-    if ! $SETUP_LOKI; then
-        section "10" "Loki + Promtail"; warn "Skipped (--no-loki)."; section_end; return
-    fi
+integrate_cockpit_docker() {
+    $SETUP_MON || { section "09" "Cockpit Container Integration"; warn "Skipped (--no-mon)."; section_end; return; }
+    section "09" "Cockpit Container Integration"
 
-    # If both Loki and Promtail for Docker already exist, skip this section
-    if $LOKI_EXISTS && $PROMTAIL_EXISTS; then
-        section "10" "Loki + Promtail"
-        ok "Both Loki and Promtail already exist — skipping deployment."
-        info "Using existing: Loki (${LOKI_PORT}) + Promtail (Docker log collection)"
-        section_end
-        return
-    fi
-
-    section "10" "Loki + Promtail — Docker Log Pipeline"
-
-    # ── Detect native Loki (installed by init.sh ≥ v7.0.0) ───────────────────
-    # When init.sh has already installed a native Loki service we must NOT deploy
-    # an additional Loki Docker container — it would fail to bind port 3100.
-    # Instead we route the Docker Promtail container to the native Loki service
-    # using host networking so it can reach 127.0.0.1:3100 directly.
-    NATIVE_LOKI=false
-    if systemctl is-active --quiet loki 2>/dev/null; then
-        NATIVE_LOKI=true
-        info "Native Loki service detected (init.sh ≥ v7.0.0) — skipping Loki container."
-        info "Docker Promtail will push to native Loki on 127.0.0.1:${LOKI_PORT}."
-    fi
-
-    mkdir -p "${MONITORING_DIR}"/{loki,promtail,data/loki}
-    chmod 777 "${MONITORING_DIR}/data/loki"
-
-    # ── Loki config (only used when deploying the Docker container) ───────────
-    cat > "${MONITORING_DIR}/loki/loki-config.yml" <<'LOKICFG'
-auth_enabled: false
-
-server:
-  http_listen_port: 3100
-  grpc_listen_port: 9096
-
-common:
-  instance_addr: 127.0.0.1
-  path_prefix: /loki
-  storage:
-    filesystem:
-      chunks_directory: /loki/chunks
-      rules_directory:  /loki/rules
-  replication_factor: 1
-  ring:
-    kvstore:
-      store: inmemory
-
-query_range:
-  results_cache:
-    cache:
-      embedded_cache:
-        enabled: true
-        max_size_mb: 100
-
-schema_config:
-  configs:
-    - from: 2020-10-24
-      store: tsdb
-      object_store: filesystem
-      schema: v13
-      index:
-        prefix: index_
-        period: 24h
-
-limits_config:
-  retention_period: 744h       # 31 days
-  ingestion_rate_mb: 16
-  ingestion_burst_size_mb: 32
-
-compactor:
-  working_directory: /loki/compactor
-  retention_enabled: true
-  delete_request_store: filesystem
-LOKICFG
-
-    # ── Promtail config ────────────────────────────────────────────────────────
-    # When native Loki is running, Promtail uses --network=host so it can reach
-    # 127.0.0.1:3100 directly.  Otherwise it talks to the "loki" container name
-    # via the shared Docker monitoring network.
-    # NOTE: in host-network mode we use PROMTAIL_DOCKER_STATUS_PORT (9081) to
-    # avoid a port conflict with the native Promtail service already bound to 9080.
-    local loki_push_url
-    local promtail_http_port
-    if $NATIVE_LOKI; then
-        loki_push_url="http://127.0.0.1:${LOKI_PORT}/loki/api/v1/push"
-        promtail_http_port=${PROMTAIL_DOCKER_STATUS_PORT}
+    if $COCKPIT_EXISTS; then
+        info "Installing cockpit-podman for container visibility in Cockpit..."
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            cockpit-podman 2>&1 | tail -3 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
+        ok "Cockpit container integration complete — manage containers at http://localhost:9090."
     else
-        loki_push_url="http://loki:3100/loki/api/v1/push"
-        promtail_http_port=${PROMTAIL_STATUS_PORT}
-    fi
-
-    cat > "${MONITORING_DIR}/promtail/promtail-config.yml" <<PTCFG
-server:
-  http_listen_port: ${promtail_http_port}
-  grpc_listen_port: 0
-
-positions:
-  filename: /tmp/positions.yaml
-
-clients:
-  - url: ${loki_push_url}
-
-scrape_configs:
-
-  # ── All Docker container logs ──────────────────────────────────────────────
-  - job_name: docker_containers
-    static_configs:
-      - targets: [localhost]
-        labels:
-          job:  docker
-          host: $(hostname)
-          __path__: /var/lib/docker/containers/*/*-json.log
-
-    pipeline_stages:
-      - json:
-          expressions:
-            output: log
-            stream: stream
-            time:   time
-      - docker: {}
-      - timestamp:
-          source: time
-          format: RFC3339Nano
-      - labels:
-          stream:
-          container_id:
-      - drop:
-          expression: '^\s*$'
-          drop_counter_reason: empty_log_line
-      - output:
-          source: output
-
-  # ── Docker daemon systemd journal ─────────────────────────────────────────
-  - job_name: journal_docker
-    journal:
-      max_age: 12h
-      labels:
-        job: docker_daemon
-      matches: _SYSTEMD_UNIT=docker.service
-    relabel_configs:
-      - source_labels: [__journal__systemd_unit]
-        target_label: unit
-      - source_labels: [__journal_priority_keyword]
-        target_label: level
-PTCFG
-
-    # ── Stop + remove any existing instances ───────────────────────────────────
-    docker rm -f promtail promtail-docker 2>/dev/null || true
-    if ! $NATIVE_LOKI; then
-        docker rm -f loki 2>/dev/null || true
-    fi
-
-    # Create shared network for loki ↔ promtail communication (skipped when using host network)
-    if ! $NATIVE_LOKI; then
-        docker network create monitoring 2>/dev/null || true
-    fi
-
-    # ── Deploy Loki (only when native Loki is NOT running) ────────────────────
-    if ! $NATIVE_LOKI; then
-        docker run -d \
-            --name loki \
-            --restart unless-stopped \
-            --network monitoring \
-            -p "127.0.0.1:${LOKI_PORT}:3100" \
-            -v "${MONITORING_DIR}/loki/loki-config.yml:/etc/loki/local-config.yaml:ro" \
-            -v "${MONITORING_DIR}/data/loki:/loki" \
-            --health-cmd='curl -sf http://127.0.0.1:3100/ready || exit 1' \
-            --health-interval=10s \
-            --health-timeout=5s \
-            --health-retries=3 \
-            --health-start-period=30s \
-            grafana/loki:latest \
-            -config.file=/etc/loki/local-config.yaml \
-            > /dev/null 2>&1 || die "Failed to start Loki container"
-
-        # ── Wait for Loki ready ────────────────────────────────────────────────────
-        info "Waiting for Loki to become ready..."
-        local retries=0
-        until curl -sf "http://127.0.0.1:${LOKI_PORT}/ready" 2>/dev/null | grep -q "ready" \
-            || (( retries++ >= 18 )); do
-            sleep 3; printf "."
-        done; echo ""
-
-        if curl -sf "http://127.0.0.1:${LOKI_PORT}/ready" 2>/dev/null | grep -q "ready"; then
-            ok "Loki is ready → http://127.0.0.1:${LOKI_PORT}"
-            info "Log retention: 31 days  |  Storage: ${MONITORING_DIR}/data/loki"
-        else
-            warn "Loki may still be starting: docker logs loki"
-        fi
-    else
-        ok "Using native Loki service → http://127.0.0.1:${LOKI_PORT}"
-    fi
-
-    # ── Deploy Promtail ────────────────────────────────────────────────────────
-    # When native Loki is running, use --network=host so Promtail reaches :3100.
-    # Use PROMTAIL_DOCKER_STATUS_PORT (9081) as the http_listen_port so it does
-    # NOT conflict with the native Promtail service already bound on :9080.
-    if $NATIVE_LOKI; then
-        docker run -d \
-            --name promtail-docker \
-            --restart unless-stopped \
-            --privileged \
-            --network host \
-            -v "${MONITORING_DIR}/promtail/promtail-config.yml:/etc/promtail/config.yml:ro" \
-            -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-            -v /var/log:/var/log:ro \
-            -v /run/log/journal:/run/log/journal:ro \
-            -v /etc/machine-id:/etc/machine-id:ro \
-            --health-cmd='curl -sf http://127.0.0.1:9081/loki/api/v1/tail || exit 1' \
-            --health-interval=15s \
-            --health-timeout=5s \
-            --health-retries=3 \
-            --health-start-period=15s \
-            grafana/promtail:latest \
-            -config.file=/etc/promtail/config.yml \
-            > /dev/null 2>&1 || die "Failed to start Promtail-docker container"
-    else
-        docker run -d \
-            --name promtail \
-            --restart unless-stopped \
-            --privileged \
-            --network monitoring \
-            -p "127.0.0.1:${PROMTAIL_STATUS_PORT}:9080" \
-            -v "${MONITORING_DIR}/promtail/promtail-config.yml:/etc/promtail/config.yml:ro" \
-            -v /var/lib/docker/containers:/var/lib/docker/containers:ro \
-            -v /var/log:/var/log:ro \
-            -v /run/log/journal:/run/log/journal:ro \
-            -v /etc/machine-id:/etc/machine-id:ro \
-            --health-cmd='curl -sf http://127.0.0.1:9080/loki/api/v1/tail || exit 1' \
-            --health-interval=15s \
-            --health-timeout=5s \
-            --health-retries=3 \
-            --health-start-period=15s \
-            grafana/promtail:latest \
-            -config.file=/etc/promtail/config.yml \
-            > /dev/null 2>&1 || die "Failed to start Promtail container"
-    fi
-
-    local promtail_name; $NATIVE_LOKI && promtail_name="promtail-docker" || promtail_name="promtail"
-    sleep 4
-    if docker ps --filter "name=${promtail_name}" --filter "status=running" | grep -q "${promtail_name}"; then
-        ok "Promtail running — collecting logs from all Docker containers."
-        info "Reads: /var/lib/docker/containers/*/*-json.log"
-        info "Labels: container_name, compose_project, compose_service, stream, host"
-    else
-        warn "Promtail container issue: docker logs ${promtail_name}"
+        info "Cockpit not installed — skipping Cockpit container integration."
     fi
 
     section_end
 }
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  11 — PATCH PROMETHEUS CONFIG
-#  Adds docker_engine + cadvisor scrape jobs.
-#  Does NOT add node_exporter — already configured by init.sh.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+patch_monitoring_scrapes() {
+    $SETUP_MON || { section "11" "Monitoring Scrape Configuration"; warn "Skipped (--no-mon)."; section_end; return; }
+    section "11" "Monitoring Scrape Configuration"
 
-patch_prometheus() {
-    $SETUP_MON || return
+    local patched=false
 
-    if ! $PROM_EXISTS; then
-        section "11" "Prometheus — Patching"
-        warn "Prometheus not found — skipping configuration patch."
-        info "If you install Prometheus later, run: prometheus_patch_docker_scrapes"
-        section_end
-        return
+    # 1. Patch VictoriaMetrics if present
+    if [[ -f "$VICTORIAMETRICS_CONFIG" ]]; then
+        info "Configuring VictoriaMetrics to scrape Docker metrics..."
+        cp "${VICTORIAMETRICS_CONFIG}" "${VICTORIAMETRICS_CONFIG}.bak.$(date +%s)"
+
+        if ! grep -q "job_name: 'docker'" "$VICTORIAMETRICS_CONFIG" && ! grep -q "job_name: 'docker_engine'" "$VICTORIAMETRICS_CONFIG"; then
+            cat >> "$VICTORIAMETRICS_CONFIG" <<'VMCFG'
+
+  - job_name: 'docker_engine'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['127.0.0.1:9323']
+        labels:
+          instance: 'docker_engine'
+VMCFG
+        fi
+
+        if $SETUP_CADVISOR && ! grep -q "job_name: 'cadvisor'" "$VICTORIAMETRICS_CONFIG"; then
+            cat >> "$VICTORIAMETRICS_CONFIG" <<'VMCFG'
+
+  - job_name: 'cadvisor'
+    scrape_interval: 30s
+    static_configs:
+      - targets: ['127.0.0.1:8080']
+        labels:
+          instance: 'cadvisor'
+VMCFG
+        fi
+
+        if systemctl is-active --quiet victoriametrics 2>/dev/null; then
+            systemctl reload victoriametrics 2>/dev/null || systemctl restart victoriametrics 2>/dev/null || true
+        fi
+        if $SETUP_CADVISOR; then
+            ok "VictoriaMetrics configured to scrape docker_engine (:9323) and cadvisor (:8080)."
+        else
+            ok "VictoriaMetrics configured to scrape native docker_engine (:9323, 30s interval)."
+        fi
+        patched=true
     fi
 
-    section "11" "Prometheus — Patching ${PROMETHEUS_CONFIG}"
+    # 2. Legacy Prometheus patch fallback
+    if [[ -f "$PROMETHEUS_CONFIG" ]]; then
+        if ! grep -q "job_name: 'docker_engine'" "$PROMETHEUS_CONFIG"; then
+            info "Patching legacy Prometheus scrape config..."
+            cat >> "$PROMETHEUS_CONFIG" <<'PROMCFG'
 
-    # Backup first
-    local backup
-    backup="${PROMETHEUS_CONFIG}.bak.$(date +%s)"
-    cp "${PROMETHEUS_CONFIG}" "${backup}"
-    ok "Backup saved: ${backup}"
-
-    local SCRAPE_JOBS='
-
-  # ── Docker daemon engine metrics ─────────────────────────────────────────────
-  # Requires: daemon.json "metrics-addr" + "experimental" — configured by docker.sh
-  - job_name: '"'"'docker_engine'"'"'
+  - job_name: 'docker_engine'
     scrape_interval: 15s
     static_configs:
-      - targets: ['"'"'127.0.0.1:9323'"'"']
-        labels:
-          instance: docker_engine
+      - targets: ['127.0.0.1:9323']
 
-  # ── cAdvisor — per-container CPU / RAM / net / disk metrics ──────────────────
-  - job_name: '"'"'cadvisor'"'"'
-    scrape_interval: 10s
-    scrape_timeout: 8s
+  - job_name: 'cadvisor'
+    scrape_interval: 15s
     static_configs:
-      - targets: ['"'"'127.0.0.1:8080'"'"']
-    metric_relabel_configs:
-      # Keep only the most useful container metrics (reduces cardinality)
-      - source_labels: [__name__]
-        regex: >-
-          container_(cpu_usage_seconds_total|memory_usage_bytes|
-          memory_working_set_bytes|network_receive_bytes_total|
-          network_transmit_bytes_total|fs_reads_bytes_total|
-          fs_writes_bytes_total|last_seen|start_time_seconds|
-          tasks_state|spec_cpu_quota|spec_memory_limit_bytes|
-          oom_events_total)
-        action: keep
-      # Drop empty/pause containers
-      - source_labels: [image]
-        regex: '"'"'.*pause.*'"'"'
-        action: drop
-      # Promote compose labels to metric labels for easy filtering
-      - source_labels: [container_label_com_docker_compose_service]
-        target_label: compose_service
-      - source_labels: [container_label_com_docker_compose_project]
-        target_label: compose_project
-      - source_labels: [name]
-        target_label: container_name'
-
-    # Only add if docker_engine job not already present
-    if grep -q "job_name.*docker_engine" "${PROMETHEUS_CONFIG}" 2>/dev/null; then
-        warn "Docker scrape jobs already present in prometheus.yml — skipping to avoid duplicates."
-    else
-        # Ensure scrape_configs: section exists
-        if ! grep -q "^scrape_configs:" "${PROMETHEUS_CONFIG}"; then
-            echo -e "\nscrape_configs:" >> "${PROMETHEUS_CONFIG}"
-        fi
-        echo "${SCRAPE_JOBS}" >> "${PROMETHEUS_CONFIG}"
-        ok "Appended scrape jobs: docker_engine + cadvisor"
-        info "node_exporter job left untouched (already configured by init.sh)"
-    fi
-
-    # Validate the config with promtool if available
-    if command -v promtool &>/dev/null; then
-        if promtool check config "${PROMETHEUS_CONFIG}" &>/dev/null; then
-            ok "prometheus.yml syntax validated by promtool."
-        else
-            warn "prometheus.yml syntax error detected. Restoring backup..."
-            cp "${backup}" "${PROMETHEUS_CONFIG}"
-            die "Prometheus config invalid. Backup restored: ${backup}"
+      - targets: ['127.0.0.1:8080']
+PROMCFG
+            if systemctl is-active --quiet prometheus 2>/dev/null; then
+                systemctl reload prometheus 2>/dev/null || systemctl restart prometheus 2>/dev/null || true
+            fi
+            ok "Prometheus scrape configuration patched."
+            patched=true
         fi
     fi
 
-    # Reload Prometheus — try HTTP first (zero downtime), then systemctl
-    if curl -sf -X POST "${PROMETHEUS_URL}/-/reload" &>/dev/null; then
-        ok "Prometheus reloaded via HTTP API (zero downtime)."
-    elif systemctl is-active prometheus &>/dev/null; then
-        systemctl reload prometheus 2>/dev/null || systemctl restart prometheus
-        ok "Prometheus reloaded via systemctl."
-    else
-        warn "Could not reload Prometheus automatically."
-        warn "Run manually: curl -X POST http://127.0.0.1:9090/-/reload"
+    if ! $patched; then
+        info "No time-series database found. Docker daemon metrics remain available on 127.0.0.1:${DOCKER_METRICS_PORT}."
     fi
 
     section_end
 }
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  12 — GRAFANA DATASOURCE — provision Loki
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-provision_loki_datasource() {
-    $SETUP_MON || return
-    $SETUP_LOKI || return
-
-    if ! $GRAFANA_EXISTS; then
-        section "12" "Grafana — Loki Datasource Provisioning"
-        warn "Grafana not found — skipping datasource provisioning."
-        info "If you install Grafana later, run with: sudo ./docker.sh --no-mon"
-        section_end
-        return
-    fi
-
-    section "12" "Grafana — Loki Datasource Provisioning"
-
-    local DS_DIR="${GRAFANA_PROVISIONING}/datasources"
-    mkdir -p "${DS_DIR}"
-
-    # ── CONFLICT RESOLUTION ──────────────────────────────────────────────────
-    # Detect if init.sh already provisioned Loki datasource and reuse it
-    if [[ -f "${DS_DIR}/loki.yaml" ]]; then
-        ok "✓ Loki datasource already provisioned by init.sh — reusing."
-        info "  Datasource: ${DS_DIR}/loki.yaml → http://127.0.0.1:${LOKI_PORT}"
-        info "  Will not create duplicate loki-docker.yaml"
-        section_end; return
-    fi
-
-    # Detect if docker.sh already provisioned datasource (idempotent)
-    if [[ -f "${DS_DIR}/loki-docker.yaml" ]]; then
-        ok "✓ Loki datasource already provisioned by docker.sh — skipping."
-        info "  Datasource: ${DS_DIR}/loki-docker.yaml"
-        section_end; return
-    fi
-
-    # ── CREATE NEW DATASOURCE (first run) ────────────────────────────────────
-    cat > "${DS_DIR}/loki-docker.yaml" <<EOF
-# Provisioned by docker.sh v${SCRIPT_VERSION}
-# NOTE: Uses same Loki endpoint as init.sh — no conflicts
-apiVersion: 1
-
-datasources:
-  - name: Loki
-    type: loki
-    access: proxy
-    url: http://127.0.0.1:${LOKI_PORT}
-    uid: Loki
-    isDefault: false
-    jsonData:
-      maxLines: 5000
-      timeout:  60
-      derivedFields:
-        - datasourceUid: Loki
-          matcherRegex: "container_id=([\\w]+)"
-          name: ContainerID
-          url: '\$\${__value.raw}'
-    version: 1
-    editable: true
-EOF
-    chown grafana:grafana "${DS_DIR}/loki-docker.yaml" 2>/dev/null || true
-    ok "✓ Loki datasource created: ${DS_DIR}/loki-docker.yaml"
-    info "  Endpoint: http://127.0.0.1:${LOKI_PORT}  |  UID: Loki"
-
-    section_end
-}
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  13 — GRAFANA DASHBOARDS — download + provision Docker dashboards
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-provision_dashboards() {
-    $SETUP_MON || return
-
-    section "13" "Grafana — Docker Dashboard Provisioning"
-
-    local DASH_DIR="${GRAFANA_DASH_DIR}/docker"
-    local APP_DASH_DIR="${GRAFANA_DASH_DIR}/applications"
-    local PROV_DIR="${GRAFANA_PROVISIONING}/dashboards"
-    
-    # Create directories with error handling
-    if ! mkdir -p "${DASH_DIR}" "${APP_DASH_DIR}" "${PROV_DIR}" 2>/dev/null; then
-        warn "Failed to create dashboard directories."
-        warn "Check permissions: sudo ls -ld /var/lib/grafana"
-        section_end; return
-    fi
-
-    # Check if Grafana directories exist
-    if [[ ! -d "${GRAFANA_PROVISIONING}" ]] || [[ ! -d "${GRAFANA_DASH_DIR}" ]]; then
-        warn "Grafana directories not found — Grafana may not be installed."
-        warn "Expected: ${GRAFANA_PROVISIONING}, ${GRAFANA_DASH_DIR}"
-        info "Run: sudo ./init.sh first to install Grafana with monitoring setup"
-        section_end; return
-    fi
-
-    # ── CONFLICT RESOLUTION ──────────────────────────────────────────────────
-    # Verify that init.sh created its dashboard providers first
-    local init_providers=0
-    [[ -f "${PROV_DIR}/system.yaml" ]] && ((++init_providers))
-    [[ -f "${PROV_DIR}/applications.yaml" ]] && ((++init_providers))
-    [[ -f "${PROV_DIR}/logs.yaml" ]] && ((++init_providers))
-    
-    if (( init_providers == 0 )); then
-        warn "No dashboard providers found from init.sh (system.yaml, applications.yaml, logs.yaml)"
-        warn "docker.sh assumes init.sh has been run first"
-        warn "This is not necessarily an error, but verify init.sh provisioning manually"
-    else
-        ok "✓ Found ${init_providers} dashboard provider(s) from init.sh — will not override"
-    fi
-
-    # Detect if docker.sh already provisioned its dashboard provider (idempotent)
-    if [[ -f "${PROV_DIR}/docker-dashboards.yaml" ]]; then
-        ok "✓ Docker dashboard provider already configured — skipping."
-        info "  Provider: ${PROV_DIR}/docker-dashboards.yaml"
-        # Still recreate dashboards in case they were deleted
-    else
-        ok "✓ Creating new Docker dashboard provider"
-    fi
-
-    # ── Provision dashboard provider (appends to existing other folders) ───────
-    cat > "${PROV_DIR}/docker-dashboards.yaml" <<EOF
-# Provisioned by docker.sh v${SCRIPT_VERSION}
-# Coexists with init.sh providers: system.yaml, applications.yaml, logs.yaml
-apiVersion: 1
-
-providers:
-  - name: Docker Monitoring
-    orgId: 1
-    folder: Docker
-    folderUid: docker-monitoring
-    type: file
-    disableDeletion: false
-    updateIntervalSeconds: 30
-    allowUiUpdates: true
-    options:
-      path: ${DASH_DIR}
-EOF
-    if [[ ! -f "${PROV_DIR}/docker-dashboards.yaml" ]]; then
-        warn "Failed to write docker-dashboards provider YAML"
-        section_end; return
-    fi
-    chown grafana:grafana "${PROV_DIR}/docker-dashboards.yaml" 2>/dev/null || true
-    ok "✓ Docker dashboard provider: ${PROV_DIR}/docker-dashboards.yaml"
-
-    # ── Create Docker Analytics Dashboard (Aggregated) ──────────────────────────
-    if [[ -f "${DASH_DIR}/04-docker-per-container-analytics.json" ]]; then
-        ok "✓ Docker per-container analytics dashboard already exists — skipping"
-    else
-        ok "✓ Creating Docker Per-Container Log Analytics dashboard..."
-        cat > "${DASH_DIR}/04-docker-per-container-analytics.json" <<'DOCKER_ANALYTICS'
-{
-  "annotations": { "list": [] },
-  "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
-  "id": null,
-  "links": [],
-  "panels": [
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "green", "value": 90 }
-          ] },
-          "unit": "percent" },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "id": 1,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-                   "textMode": "auto" },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * (sum(count_over_time({job=\"docker_containers\"}[5m])) - sum(count_over_time({job=\"docker_containers\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({job=\"docker_containers\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "✅ Success Rate",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "red", "value": null },
-            { "color": "red", "value": 10 }
-          ] },
-          "unit": "percent" },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "id": 2,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-                   "textMode": "auto" },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * sum(count_over_time({job=\"docker_containers\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({job=\"docker_containers\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "❌ Error Rate",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "yellow", "value": null },
-            { "color": "yellow", "value": 5 }
-          ] },
-          "unit": "percent" },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "id": 3,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-                   "textMode": "auto" },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * sum(count_over_time({job=\"docker_containers\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({job=\"docker_containers\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "⚠️ Warning Rate",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "id": 5,
-      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({job=\"docker_containers\"} |~ \"ERROR|Exception\" [5m])) by (container_name)",
-          "refId": "A" }
-      ],
-      "title": "Errors per Container",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-      "id": 6,
-      "options": { "legend": { "calcs": ["sum"], "displayMode": "table", "placement": "bottom" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({job=\"docker_containers\"} |~ \"WARN|WARNING\" [5m])) by (container_name)",
-          "refId": "A" }
-      ],
-      "title": "Warnings per Container",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
-      "id": 7,
-      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showLabels": true, "showTime": true, "sortOrder": "Descending" },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "{job=\"docker_containers\"}",
-          "refId": "A" }
-      ],
-      "title": "📋 Docker Container Logs",
-      "type": "logs"
-    }
-  ],
-  "refresh": "5s",
-  "schemaVersion": 38,
-  "tags": ["docker", "containers", "loki"],
-  "time": { "from": "now-6h", "to": "now" },
-  "timezone": "browser",
-  "title": "🐳 Docker Per-Container Log Analytics",
-  "uid": "docker-per-container-analytics",
-  "version": 1,
-  "style": "dark"
-}
-DOCKER_ANALYTICS
-
-        chmod 644 "${DASH_DIR}/04-docker-per-container-analytics.json"
-        chown grafana:grafana "${DASH_DIR}/04-docker-per-container-analytics.json" 2>/dev/null || true
-    fi
-
-    # ── Create Per-Container Template Dashboard ──────────────────────────────────
-    if [[ -f "${DASH_DIR}/05-template-per-container-analytics.json" ]]; then
-        ok "✓ Docker per-container template dashboard already exists — skipping"
-    else
-        ok "✓ Creating Docker per-container template dashboard..."
-        cat > "${DASH_DIR}/05-template-per-container-analytics.json" <<'TEMPLATE_CONTAINER'
-{
-  "annotations": { "list": [] },
-  "editable": true,
-  "description": "Template: Duplicate & set container_name for each container",
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
-  "id": null,
-  "links": [],
-  "templating": {
-    "list": [
-      {
-        "name": "container_name",
-        "type": "textbox",
-        "label": "📦 Container Name",
-        "description": "Set to your Docker container name",
-        "value": "nginx",
-        "current": { "text": "nginx", "value": "nginx" }
-      }
-    ]
-  },
-  "panels": [
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "green", "value": 90 }
-          ] } },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "id": 1,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-                   "textMode": "auto" },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * (sum(count_over_time({container_name=\"${container_name}\"}[5m])) - sum(count_over_time({container_name=\"${container_name}\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({container_name=\"${container_name}\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "✅ Success Rate — ${container_name}",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "red", "value": null },
-            { "color": "red", "value": 10 }
-          ] } },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "id": 2,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-                   "textMode": "auto" },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * sum(count_over_time({container_name=\"${container_name}\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({container_name=\"${container_name}\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "❌ Error Rate — ${container_name}",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "yellow", "value": null },
-            { "color": "yellow", "value": 5 }
-          ] } },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "id": 3,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
-                   "textMode": "auto" },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * sum(count_over_time({container_name=\"${container_name}\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({container_name=\"${container_name}\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "⚠️ Warning Rate — ${container_name}",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" } },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "id": 4,
-      "options": { "legend": { "calcs": ["sum"] } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({container_name=\"${container_name}\"}[5m]))",
-          "refId": "A" }
-      ],
-      "title": "📊 Log Count — ${container_name}",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "id": 5,
-      "options": { "legend": { "displayMode": "table" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({container_name=\"${container_name}\"} |~ \"ERROR|Exception\" [5m]))",
-          "refId": "A" }
-      ],
-      "title": "❌ Error Trend — ${container_name}",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-      "id": 6,
-      "options": { "legend": { "displayMode": "table" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({container_name=\"${container_name}\"} |~ \"WARN|WARNING\" [5m]))",
-          "refId": "A" }
-      ],
-      "title": "⚠️ Warning Trend — ${container_name}",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
-      "id": 7,
-      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showLabels": true, "showTime": true },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "{container_name=\"${container_name}\"}",
-          "refId": "A" }
-      ],
-      "title": "📋 Container Logs — ${container_name}",
-      "type": "logs"
-    }
-  ],
-  "refresh": "5s",
-  "schemaVersion": 38,
-  "tags": ["docker", "container", "template"],
-  "time": { "from": "now-6h", "to": "now" },
-  "timezone": "browser",
-  "title": "🐳 Template — Per-Container Analytics",
-  "uid": "docker-template-per-container",
-  "version": 1,
-  "style": "dark"
-}
-TEMPLATE_CONTAINER
-
-        chmod 644 "${DASH_DIR}/05-template-per-container-analytics.json"
-        chown grafana:grafana "${DASH_DIR}/05-template-per-container-analytics.json" 2>/dev/null || true
-    fi
-
-    # ── Create PM2 Analytics Dashboard ─────────────────────────────────────────
-    if [[ -f "${APP_DASH_DIR}/04-pm2-per-process-analytics.json" ]]; then
-        ok "✓ PM2 per-process analytics dashboard already exists — skipping"
-    else
-        ok "✓ Creating PM2 per-process analytics dashboard..."
-        cat > "${APP_DASH_DIR}/04-pm2-per-process-analytics.json" <<'PM2_ANALYTICS'
-{
-  "annotations": { "list": [] },
-  "editable": true,
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
-  "id": null,
-  "links": [],
-  "panels": [
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "green", "value": 90 }
-          ] } },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "id": 1,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * (sum(count_over_time({job=\"pm2\"}[5m])) - sum(count_over_time({job=\"pm2\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({job=\"pm2\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "✅ Success Rate",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "red", "value": null },
-            { "color": "red", "value": 10 }
-          ] } },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "id": 2,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * sum(count_over_time({job=\"pm2\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({job=\"pm2\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "❌ Error Rate",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "yellow", "value": null },
-            { "color": "yellow", "value": 5 }
-          ] } },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "id": 3,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * sum(count_over_time({job=\"pm2\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({job=\"pm2\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "⚠️ Warning Rate",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" } },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "id": 4,
-      "options": { "legend": { "displayMode": "list" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({job=\"pm2\"}[5m]))",
-          "refId": "A" }
-      ],
-      "title": "📊 Log Distribution",
-      "type": "piechart"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "id": 5,
-      "options": { "legend": { "displayMode": "table" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({job=\"pm2\"} |~ \"ERROR|Exception\" [5m])) by (name)",
-          "refId": "A" }
-      ],
-      "title": "Errors per Process",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-      "id": 6,
-      "options": { "legend": { "displayMode": "table" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({job=\"pm2\"} |~ \"WARN|WARNING\" [5m])) by (name)",
-          "refId": "A" }
-      ],
-      "title": "Warnings per Process",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
-      "id": 7,
-      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showLabels": true, "showTime": true },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "{job=\"pm2\"}",
-          "refId": "A" }
-      ],
-      "title": "📋 PM2 Process Logs",
-      "type": "logs"
-    }
-  ],
-  "refresh": "5s",
-  "schemaVersion": 38,
-  "tags": ["pm2", "process", "loki"],
-  "time": { "from": "now-6h", "to": "now" },
-  "timezone": "browser",
-  "title": "🔍 PM2 Per-Process Analytics",
-  "uid": "pm2-per-process-analytics",
-  "version": 1,
-  "style": "dark"
-}
-PM2_ANALYTICS
-
-        chmod 644 "${APP_DASH_DIR}/04-pm2-per-process-analytics.json"
-        chown grafana:grafana "${APP_DASH_DIR}/04-pm2-per-process-analytics.json" 2>/dev/null || true
-    fi
-
-    # ── Create PM2 Template Dashboard ──────────────────────────────────────────
-    if [[ -f "${APP_DASH_DIR}/05-template-pm2-per-process-analytics.json" ]]; then
-        ok "✓ PM2 per-process template dashboard already exists — skipping"
-    else
-        ok "✓ Creating PM2 per-process template dashboard..."
-        cat > "${APP_DASH_DIR}/05-template-pm2-per-process-analytics.json" <<'TEMPLATE_PM2'
-{
-  "annotations": { "list": [] },
-  "editable": true,
-  "description": "Template: Duplicate & set process_name for each PM2 app",
-  "fiscalYearStartMonth": 0,
-  "graphTooltip": 1,
-  "id": null,
-  "links": [],
-  "templating": {
-    "list": [
-      {
-        "name": "process_name",
-        "type": "textbox",
-        "label": "⚙️ Process Name",
-        "description": "Set to your PM2 process name",
-        "value": "api-server",
-        "current": { "text": "api-server", "value": "api-server" }
-      }
-    ]
-  },
-  "panels": [
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "green", "value": null },
-            { "color": "green", "value": 90 }
-          ] } },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "id": 1,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * (sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m])) - sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"ERROR|Exception|WARN|WARNING\"[5m]))) / (sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "✅ Success Rate — ${process_name}",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "red", "value": null },
-            { "color": "red", "value": 10 }
-          ] } },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
-      "id": 2,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"ERROR|Exception\" [5m])) / (sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "❌ Error Rate — ${process_name}",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": {
-        "defaults": { "color": { "mode": "thresholds" }, "unit": "percent",
-          "thresholds": { "mode": "absolute", "steps": [
-            { "color": "yellow", "value": null },
-            { "color": "yellow", "value": 5 }
-          ] } },
-        "overrides": []
-      },
-      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
-      "id": 3,
-      "options": { "colorMode": "background", "graphMode": "area", "justifyMode": "center",
-                   "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "100 * sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"WARN|WARNING\" [5m])) / (sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m])) + 1)",
-          "refId": "A" }
-      ],
-      "title": "⚠️ Warning Rate — ${process_name}",
-      "type": "gauge"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" } },
-      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
-      "id": 4,
-      "options": { "legend": { "displayMode": "list" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({job=\"pm2\", name=\"${process_name}\"}[5m]))",
-          "refId": "A" }
-      ],
-      "title": "📊 Log Count — ${process_name}",
-      "type": "stat"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
-      "id": 5,
-      "options": { "legend": { "displayMode": "table" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"ERROR|Exception\" [5m]))",
-          "refId": "A" }
-      ],
-      "title": "❌ Error Trend — ${process_name}",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
-      "id": 6,
-      "options": { "legend": { "displayMode": "table" } },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "sum(count_over_time({job=\"pm2\", name=\"${process_name}\"} |~ \"WARN|WARNING\" [5m]))",
-          "refId": "A" }
-      ],
-      "title": "⚠️ Warning Trend — ${process_name}",
-      "type": "timeseries"
-    },
-    {
-      "datasource": { "type": "loki", "uid": "Loki" },
-      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 12 },
-      "id": 7,
-      "options": { "dedupStrategy": "none", "enableLogDetails": true, "showLabels": true, "showTime": true },
-      "targets": [
-        { "datasource": { "type": "loki", "uid": "Loki" },
-          "expr": "{job=\"pm2\", name=\"${process_name}\"}",
-          "refId": "A" }
-      ],
-      "title": "📋 Process Logs — ${process_name}",
-      "type": "logs"
-    }
-  ],
-  "refresh": "5s",
-  "schemaVersion": 38,
-  "tags": ["pm2", "process", "template"],
-  "time": { "from": "now-6h", "to": "now" },
-  "timezone": "browser",
-  "title": "🔍 Template — Per-Process Analytics",
-  "uid": "pm2-template-per-process",
-  "version": 1,
-  "style": "dark"
-}
-TEMPLATE_PM2
-
-        chmod 644 "${APP_DASH_DIR}/05-template-pm2-per-process-analytics.json"
-        chown grafana:grafana "${APP_DASH_DIR}/05-template-pm2-per-process-analytics.json" 2>/dev/null || true
-    fi
-
-    # ── Finalize provisioning ────────────────────────────────────────────────────
-    ok "✓ All dashboards checked and provisioned"
-    info ""
-    info "📊 Grafana Dashboards:"
-    info "   Docker folder:"
-    info "     • 04-docker-per-container-analytics.json (aggregated)"
-    info "     • 05-template-per-container-analytics.json (template)"
-    info "   Applications folder:"
-    info "     • 04-pm2-per-process-analytics.json (aggregated)"
-    info "     • 05-template-pm2-per-process-analytics.json (template)"
-
-    section_end
-    return
-}
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  14 — RELOAD GRAFANA
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# (see actual implementation below)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# (see actual implementation below)
-
-
-#  15 — SMOKE TEST + VERIFICATION
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  14 — RELOAD GRAFANA
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-reload_grafana() {
-    $SETUP_MON || return
-
-    if ! $GRAFANA_EXISTS; then
-        section "14" "Grafana — Reload Provisioning"
-        warn "Grafana not found — skipping reload."
-        section_end
-        return
-    fi
-
-    section "14" "Grafana — Reload Provisioning"
-
-    if systemctl is-active --quiet grafana-server 2>/dev/null; then
-        systemctl restart grafana-server
-        sleep 3
-        if systemctl is-active --quiet grafana-server; then
-            ok "Grafana restarted — new datasource + dashboards loaded."
-        else
-            warn "Grafana failed to restart: journalctl -xu grafana-server"
-        fi
-    else
-        warn "Grafana service not active. Start it: sudo systemctl start grafana-server"
-    fi
-
-    section_end
-}
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  15 — SMOKE TEST + VERIFICATION
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 verify_all() {
-    section "15" "Smoke Test + Verification"
+    section "12" "Smoke Test + Verification"
 
     # Docker hello-world
     info "Running Docker smoke test (hello-world container)..."
@@ -1870,7 +780,6 @@ verify_all() {
             echo -e "  ${WARN_IC}  ${YLW}${label}${R}  ${GRY}→  ${url}  (not ready yet)${R}"
         fi
     }
-    # Helper: check container state
     _chk_ct() {
         local name="$1"
         if docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${name}$"; then
@@ -1881,7 +790,6 @@ verify_all() {
             echo -e "  ${WARN_IC}  ${YLW}${name}${R}  container  ${GRY}NOT RUNNING${R}"
         fi
     }
-    # Helper: check systemd service
     _chk_svc() {
         local name="$1" label="$2"
         if systemctl is-active --quiet "${name}" 2>/dev/null; then
@@ -1896,30 +804,20 @@ verify_all() {
     _chk_svc "docker"               "Docker daemon"
 
     echo ""
-    echo -e "  ${BLU}${BOLD}Monitoring Containers${R}"
-    _chk_ct  "cadvisor"
-    _chk_ep  "cAdvisor Metrics"     "http://127.0.0.1:${CADVISOR_PORT}/metrics"       "container_cpu"
-    if $SETUP_LOKI; then
-        if $NATIVE_LOKI; then
-            _chk_svc "loki"          "Loki (native systemd)"
-            _chk_ep  "Loki Ready"    "http://127.0.0.1:${LOKI_PORT}/ready"                        "ready"
-            _chk_ct  "promtail-docker"
-            _chk_ep  "Promtail-docker Status"  "http://127.0.0.1:${PROMTAIL_DOCKER_STATUS_PORT}/ready"  "."
-        else
-            _chk_ct  "loki"
-            _chk_ep  "Loki Ready"       "http://127.0.0.1:${LOKI_PORT}/ready"             "ready"
-            _chk_ct  "promtail"
-            _chk_ep  "Promtail Status"  "http://127.0.0.1:${PROMTAIL_STATUS_PORT}/ready"  "."
-        fi
+    echo -e "  ${BLU}${BOLD}Monitoring & Management${R}"
+    if $SETUP_CADVISOR; then
+        _chk_ct  "cadvisor"
+        _chk_ep  "cAdvisor Metrics"     "http://127.0.0.1:${CADVISOR_PORT}/metrics"       "container_cpu"
+    else
+        echo -e "  ${TICK}  cAdvisor            disabled (lean profile — saves ~60MB RAM)"
     fi
-
-    echo ""
-    echo -e "  ${BLU}${BOLD}init.sh Components (unchanged)${R}"
-    _chk_svc "node_exporter"  "node_exporter"
-    _chk_svc "prometheus"     "Prometheus"
-    _chk_ep  "Prometheus"     "${PROMETHEUS_URL}/-/healthy"  "Prometheus"
-    _chk_svc "grafana-server" "Grafana"
-    _chk_ep  "Grafana"        "${GRAFANA_URL}/api/health"    "ok"
+    if $COCKPIT_EXISTS; then
+        _chk_svc "cockpit.socket"   "Cockpit Console"
+    fi
+    if $VM_EXISTS; then
+        _chk_svc "victoriametrics"  "VictoriaMetrics"
+        _chk_ep  "VMUI Ready"       "${VICTORIAMETRICS_URL}/health"                   "."
+    fi
 
     echo ""
     echo -e "  ${BLU}${BOLD}Ecosystem Tools${R}"
@@ -1931,20 +829,19 @@ verify_all() {
     section_end
 }
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  16 — SUMMARY
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 print_summary() {
     echo ""
     echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${GRN}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  ✔  docker.sh Complete — Docker CE + Full Monitoring Integration"
+    printf  "  ${BLU}${BOLD}║${R}${GRN}${BOLD}%-76s${R}${BLU}${BOLD}║${R}
+" \
+            "  ✔  docker.sh Complete — Docker CE + Cockpit & VictoriaMetrics Ready"
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
 
-    _row() { printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${WHT}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" "$1" "$2"; }
+    _row() { printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${WHT}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}
+" "$1" "$2"; }
     _sep() { echo -e "  ${BLU}${BOLD}╠${HR2}╣${R}"; }
-    _hdr() { printf "  ${BLU}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" "$1"; }
+    _hdr() { printf "  ${BLU}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}
+" "$1"; }
 
     _hdr "Docker Stack"
     _sep
@@ -1956,22 +853,27 @@ print_summary() {
     _row "Metrics Endpoint" "http://127.0.0.1:${DOCKER_METRICS_PORT}/metrics"
 
     _sep
-    _hdr "Monitoring — Integrated with init.sh Prometheus + Grafana"
+    _hdr "Monitoring & Management Integration"
     _sep
     _row "cAdvisor"         "Container CPU/RAM/net/disk → :${CADVISOR_PORT}"
-    _row "Loki"             "Docker log storage → :${LOKI_PORT}  (31-day retention)"
-    _row "Promtail"         "Reads all container logs → ships to Loki"
-    _row "Prometheus"       "Scraping docker_engine + cadvisor  (node_exporter unchanged)"
-    _row "Grafana"          "SSH tunnel → http://localhost:3001  (Docker folder added)"
-    _row "Dashboards"       "5 Docker dashboards in Grafana → Docker folder"
+    _row "Cockpit UI"       "Container management & logs → http://localhost:9090"
+    _row "VictoriaMetrics"  "Time-series metrics & VMUI → http://localhost:8428/vmui"
 
     _sep
-    _hdr "🔭  Access Grafana Dashboards (SSH Tunnel — same as init.sh)"
+    _hdr "🔭  Access Management & Metrics (SSH Tunnels)"
     _sep
-    printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
-        "ssh -L 3001:localhost:3001 ${DEPLOY_USER}@<server-ip>"
-    printf "  ${BLU}${BOLD}║${R}  ${WHT}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
-        "Then open: http://localhost:3001  →  Dashboards  →  Docker"
+    printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}
+" \
+        "Cockpit GUI:         ssh -L 9090:localhost:9090 ${DEPLOY_USER}@<server-ip>"
+    printf "  ${BLU}${BOLD}║${R}  ${WHT}%-74s${R}  ${BLU}${BOLD}║${R}
+" \
+        "                     http://localhost:9090  (Login as ${DEPLOY_USER})"
+    printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}
+" \
+        "VictoriaMetrics VMUI: ssh -L 8428:localhost:8428 ${DEPLOY_USER}@<server-ip>"
+    printf "  ${BLU}${BOLD}║${R}  ${WHT}%-74s${R}  ${BLU}${BOLD}║${R}
+" \
+        "                     http://localhost:8428/vmui"
 
     _sep
     _hdr "🐳  Docker Quick Reference"
@@ -1989,33 +891,17 @@ print_summary() {
         "docker system prune -af          free all unused disk"
     )
     for c in "${cmds[@]}"; do
-        printf "  ${BLU}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}\n" "$c"
+        printf "  ${BLU}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}
+" "$c"
     done
 
     _sep
-    _hdr "📋  LogQL Queries — Grafana Explore → Loki"
-    _sep
-    local logql=(
-        "{job=\"docker\"}                       all container logs"
-        "{container_name=\"myapp\"}             single container"
-        "{job=\"docker\"} |= \"error\"           filter errors"
-        "{compose_project=\"myapp\"}            all services in a compose project"
-        "{job=\"docker\", stream=\"stderr\"}     stderr only"
-    )
-    for q in "${logql[@]}"; do
-        printf "  ${BLU}${BOLD}║${R}  ${GRN}·${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}\n" "$q"
-    done
-
-    _sep
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
+    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}
+" \
             "  Log: ${LOG_FILE}"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 }
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  MAIN
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 main() {
     mkdir -p "$(dirname "$LOG_FILE")"
@@ -2034,14 +920,11 @@ main() {
     configure_daemon            # 06 — daemon.json: BuildKit + log rotation + metrics
     add_user_to_docker_group    # 07 — usermod -aG docker $DEPLOY_USER
     install_ecosystem_tools     # 08 — ctop, lazydocker, docker scout, bash-completion
-    deploy_cadvisor             # 09 — cAdvisor container (127.0.0.1:8080)
-    deploy_loki_promtail        # 10 — Loki + Promtail containers for log pipeline
-    patch_prometheus            # 11 — append docker_engine + cadvisor to prometheus.yml
-    provision_loki_datasource   # 12 — write Loki datasource to Grafana provisioning
-    provision_dashboards        # 13 — download + provision 5 Docker dashboards
-    reload_grafana              # 14 — restart grafana-server to apply provisioning
-    verify_all                  # 15 — smoke test + endpoint checks
-    print_summary               # 16 — full summary + quick reference
+    integrate_cockpit_docker    # 09 — Cockpit container management integration
+    deploy_cadvisor             # 10 — cAdvisor container (127.0.0.1:8080)
+    patch_monitoring_scrapes    # 11 — patch VictoriaMetrics / Prometheus scrape configs
+    verify_all                  # 12 — smoke test + endpoint checks
+    print_summary               # 13 — full summary + quick reference
 
     _log INFO "=== docker.sh complete. User=${DEPLOY_USER} ==="
 }

@@ -26,16 +26,16 @@ A curated collection of production-grade bash scripts that transform a blank Ubu
 │  │  init.sh  │  │ nginx.sh │  │      docker.sh       │  │
 │  │           │  │          │  │                      │  │
 │  │ User+SSH  │  │  Nginx   │  │  Docker CE + Compose │  │
-│  │ NVM+Node  │  │  vHosts  │  │  cAdvisor + Loki     │  │
-│  │ PM2       │  │  SSL/TLS │  │  Docker dashboards   │  │
-│  │ Prometheus│  │  acme.sh │  │                      │  │
-│  │ Grafana   │  └──────────┘  └──────────────────────┘  │
-│  │ Loki      │                                          │
-│  │ Promtail  │  Monitoring stack (port 13001)           │
-│  │ClickHouse │  ┌─────────────────────────────────────┐  │
-│  └──────────┘  │  Grafana  ←  Prometheus  ←  node_exp │  │
-│                │  Grafana  ←  Loki  ←  Promtail       │  │
-│                │  Grafana  ←  PM2 exporter  ←  PM2    │  │
+│  │ NVM+Node  │  │  vHosts  │  │  cAdvisor metrics    │  │
+│  │ PM2       │  │  SSL/TLS │  │  Cockpit integration │  │
+│  │ Cockpit   │  │  acme.sh │  │                      │  │
+│  │ Vict.Metr.│  └──────────┘  └──────────────────────┘  │
+│  │ journald  │                                          │
+│  └──────────┘  Lean Monitoring Stack (~100MB Total RAM) │
+│                ┌─────────────────────────────────────┐  │
+│                │  Cockpit (9090)   ← systemd/journald │  │
+│                │  Vict.Metr.(8428) ← PM2 / node / dock│  │
+│                │  Built-in VMUI    ← PromQL explorer  │  │
 │                └─────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -65,16 +65,14 @@ sudo ./init.sh
 | Sudo | Full root access (with password) + NOPASSWD for PM2/apt |
 | NVM + Node.js | Selected version via NVM |
 | PM2 | Process manager with bulletproof systemd startup |
-| PM2 exporter | Prometheus metrics for all PM2 apps (auto-discovered) |
-| Prometheus | Metrics database — node, PM2, system (15-day retention) |
-| Grafana | Dashboard UI on `127.0.0.1:13001` |
-| Loki | Log aggregation backend on `127.0.0.1:3100` |
-| Promtail | Log agent — collects syslog, auth, kern, PM2 app logs |
-| ClickHouse | 2-day short-term log backend for analytical queries |
+| PM2 exporter | Prometheus metrics for all PM2 apps (auto-discovered on `:9209`) |
+| Cockpit | Web management console & real-time hardware/log viewer on `127.0.0.1:9090` (0 MB idle RAM) |
+| VictoriaMetrics | Ultra-lightweight time-series TSDB & VMUI on `127.0.0.1:8428` (48 MB RAM cap) |
+| Native journald | System & app log indexing with compact 150MB limit & 30MB buffer |
 | Kernel hardening | sysctl — SYN flood, IP spoof, file descriptor tuning |
 | fail2ban | SSH brute-force protection (ban after 5 failures) |
-| UFW firewall | SSH open; monitoring ports bound to localhost |
-| Log rotation | PM2 logs: 14-day retention, daily, compressed |
+| UFW firewall | SSH open; management & monitoring ports bound to localhost |
+| Log rotation | PM2 logs: automated rotation, compression, and retention |
 
 → **Full documentation:** [init-README.md](init-README.md)
 
@@ -84,7 +82,7 @@ sudo ./init.sh
 
 **Docker CE + monitoring integration — run after `init.sh`.**
 
-Installs Docker CE and connects all Docker metrics and logs into the existing Prometheus + Grafana + Loki stack without touching any existing configuration.
+Installs Docker CE and seamlessly connects Docker container management into Cockpit and container metrics into VictoriaMetrics.
 
 ```bash
 wget https://raw.githubusercontent.com/mojahid2021/Production-Server/main/docker.sh
@@ -99,9 +97,10 @@ sudo ./docker.sh
 | Docker CE | Latest stable from official APT repository |
 | Docker Compose v2 | Integrated plugin |
 | BuildKit | Fast, cached image builds |
-| cAdvisor | Per-container CPU / RAM / network / disk metrics |
-| Loki + Promtail | Container log pipeline via Docker socket |
-| 5 Grafana dashboards | Docker Overview, Container Stats, Logs, and more |
+| Cockpit Integration | View, start, stop, and inspect containers in Cockpit GUI |
+| cAdvisor | Per-container CPU / RAM / network / disk metrics on `:8080` |
+| VictoriaMetrics Scrape | Auto-scrapes Docker daemon (`:9323`) and cAdvisor (`:8080`) |
+| Ecosystem Tools | ctop, Lazydocker, and Docker Scout |
 
 → **Full documentation:** [Docker-README.md](Docker-README.md)
 
@@ -153,65 +152,70 @@ sudo ./nginx.sh
 4.  Add an Nginx virtual host + SSL
     sudo ./nginx.sh
 
-5.  Monitor everything in Grafana
-    ssh -L 13001:localhost:13001 <user>@<server>
-    # open http://localhost:13001  (admin / admin — change immediately)
-    #   System tab  → Node Exporter Full  (CPU, RAM, disk, network)
-    #   Apps tab    → PM2 Process Monitor (per-app status, CPU, RAM, restarts)
-    #   Explore     → Loki datasource     (system logs, auth, PM2 app logs)
+5.  Monitor everything in Cockpit & VictoriaMetrics
+    # Cockpit Host Management & Logs:
+    ssh -L 9090:localhost:9090 <user>@<server>
+    # open http://localhost:9090  (Login with deploy user / password)
+    #   System tab     → Real-time CPU, RAM, Disk I/O, Network
+    #   Services tab   → Start/stop/restart PM2, Nginx, Docker units
+    #   Logs tab       → Filter and search systemd-journald logs
+    #   Containers tab → Manage Docker containers
+
+    # VictoriaMetrics Time-Series Explorer (VMUI):
+    ssh -L 8428:localhost:8428 <user>@<server>
+    # open http://localhost:8428/vmui
+    #   Query metrics  → PromQL / MetricsQL for PM2, Docker, Node
 ```
 
 ---
 
-## Monitoring Stack
+## Monitoring & Management Stack
 
-All monitoring services are bound to `127.0.0.1` and accessed via SSH port forwarding. Nothing is exposed to the public internet.
+All services are bound to `127.0.0.1` and accessed via SSH port forwarding. Nothing is exposed to the public internet.
 
 | Service | Address | Purpose |
 |---------|---------|---------|
-| Grafana | `127.0.0.1:13001` | Dashboard UI — metrics + logs |
-| Prometheus | `127.0.0.1:9090` | Metrics database |
-| node_exporter | `127.0.0.1:9100` | System metrics collector |
-| PM2 exporter | `127.0.0.1:9209` | PM2 process metrics (auto-discovered) |
-| Loki | `127.0.0.1:3100` | Log aggregation backend |
-| Promtail | `127.0.0.1:9080` | Log collection agent |
-| ClickHouse | `127.0.0.1:17123` | Short-term log analytics backend (2-day retention) |
+| Cockpit | `127.0.0.1:9090` | Web Console — system management, journald logs, Docker (0 MB idle RAM) |
+| VictoriaMetrics | `127.0.0.1:8428` | Time-series TSDB & VMUI visual explorer (48 MB RAM cap) |
+| PM2 exporter | `127.0.0.1:9209` | PM2 process metrics (heap, CPU, event loop, restarts) |
+| Docker Daemon | `127.0.0.1:9323` | Native Docker engine metrics (via docker.sh, 0 extra containers) |
+| cAdvisor | `127.0.0.1:8080` | Optional per-container metrics (via `docker.sh --with-cadvisor`) |
 
-**Accessing Grafana:**
+**Accessing Cockpit Web Console:**
 
 ```bash
-# Forward port over SSH
-ssh -L 13001:localhost:13001 <user>@<server-ip>
+# Forward Cockpit port over SSH
+ssh -L 9090:localhost:9090 <user>@<server-ip>
 
 # Then open in your browser
-http://localhost:13001
-# Default credentials: admin / admin  (change on first login)
+http://localhost:9090
+# Login using your deploy user credentials (or root)
 ```
 
-**Pre-provisioned dashboards:**
+**Accessing VictoriaMetrics VMUI:**
 
-| Dashboard | Folder | Data Source |
-|-----------|--------|-------------|
-| Node Exporter Full | System | Prometheus |
-| PM2 Process Monitor | Apps | Prometheus |
+```bash
+# Forward VictoriaMetrics port over SSH
+ssh -L 8428:localhost:8428 <user>@<server-ip>
 
-**Querying logs in Grafana (Explore → Loki):**
+# Then open in your browser
+http://localhost:8428/vmui
+```
 
-```logql
-# All PM2 app logs
-{job="pm2"}
+**Useful MetricsQL / PromQL Queries in VMUI:**
 
-# Only error lines from PM2 apps
-{job="pm2"} |= "error"
+```promql
+# PM2 App Memory Usage (Heap & RSS)
+pm2_process_memory_usage_bytes{instance="pm2_apps"}
 
-# Authentication log (SSH logins, sudo)
-{job="auth"}
+# PM2 App CPU Utilization
+pm2_process_cpu_usage_ratio{instance="pm2_apps"}
 
-# System syslog
-{job="syslog"}
+# PM2 Process Restarts
+pm2_process_restart_count{instance="pm2_apps"}
 
-# Kernel messages
-{job="kern"}
+# Docker Container CPU Usage (via cAdvisor)
+container_cpu_usage_seconds_total
 ```
 
 ---
@@ -232,8 +236,8 @@ http://localhost:13001
 - Monitoring ports are **localhost-only** — not reachable from the public internet.
 - SSH root login is **disabled** by `init.sh`. Use `ssh <user>@<server>` then `sudo -i`.
 - UFW firewall allows only port 22 (SSH) by default. Open additional ports as needed with `sudo ufw allow <port>/tcp`.
-- All downloaded binaries come from official sources (GitHub releases, Grafana APT, Docker APT).
-- Change the Grafana default password (`admin/admin`) immediately after first login.
+- All downloaded binaries come from official sources (GitHub releases, Ubuntu APT, Docker APT).
+- Cockpit authenticates securely using native Linux system user credentials via PAM.
 
 ---
 

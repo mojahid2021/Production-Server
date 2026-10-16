@@ -148,6 +148,12 @@ detect_os() {
 check_dependencies() {
   section "Dependency Check"
 
+  # ── Connect with init.sh canonical server metadata if present ───────────────
+  if [[ -f /etc/production-server.conf ]]; then
+    source /etc/production-server.conf 2>/dev/null || true
+    info "Connected to init.sh server metadata (/etc/production-server.conf)."
+  fi
+
   # ── Helper: install a package ───────────────────────────────────────────────
   pkg_install() {
     local pkg_apt="$1" pkg_dnf="${2:-$1}" pkg_pac="${3:-$1}"
@@ -264,7 +270,9 @@ check_dependencies() {
   # ── 11. ufw / firewalld (optional — firewall awareness) ──────────────────────
   if command -v ufw &>/dev/null; then
     success "ufw — ok (firewall detected)"
-    if ask_yes_no "Automatically open nginx ports (80/443) in UFW?" "y"; then
+    if ufw status 2>/dev/null | grep -E '(80/tcp|443/tcp|Nginx)' &>/dev/null; then
+      success "Nginx ports (80/443) already permitted in UFW (configured by init.sh) — no duplication needed."
+    elif ask_yes_no "Automatically open nginx ports (80/443) in UFW?" "y"; then
       ufw allow 'Nginx Full' 2>/dev/null && success "Nginx ports (80/443) opened in UFW." || warn "Failed to open nginx ports in UFW."
     else
       info "Ensure ports 80 and 443 are open: sudo ufw allow 'Nginx Full'"
@@ -477,6 +485,13 @@ collect_site_type() {
 
   case "$SITE_TYPE" in
     proxy)
+      if [[ -n "${DEPLOY_USER:-}" ]] && command -v pm2 &>/dev/null; then
+        local pm2_list
+        pm2_list=$(su - "$DEPLOY_USER" -c 'export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh" 2>/dev/null; pm2 jlist 2>/dev/null' 2>/dev/null | grep -o '"name":"[^"]*"' | cut -d'"' -f4 | tr '\n' ' ' || true)
+        if [[ -n "$pm2_list" ]]; then
+          sub_info "PM2 apps detected under deploy user (${DEPLOY_USER}): ${pm2_list}"
+        fi
+      fi
       PROXY_HOST=$(ask_input "Backend host/IP" "127.0.0.1")
       while true; do
         PROXY_PORT=$(ask_input "Backend port (e.g. 3000, 8000, 8080)" "")

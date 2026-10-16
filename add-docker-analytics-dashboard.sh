@@ -1,8 +1,16 @@
 #!/bin/bash
-# Add Docker Per-Container Log Analytics Dashboard to existing Grafana installation
-# Run this on your production server to add the new dashboard without rerunning docker.sh
+# [LEGACY] Add Docker Per-Container Log Analytics Dashboard to existing Grafana installation
+# NOTE: The default production stack now uses Cockpit (:9090) and VictoriaMetrics (:8428).
+# This script is retained for backward compatibility with legacy Grafana deployments.
 
 set -euo pipefail
+
+if ! command -v grafana-server &>/dev/null && [[ ! -d "/var/lib/grafana" ]]; then
+    echo "Notice: Grafana is not installed on this server."
+    echo "The production server monitoring architecture uses Cockpit (:9090) and VictoriaMetrics (:8428)."
+    echo "This script is retained for legacy Grafana deployments only."
+    exit 0
+fi
 
 DASHBOARD_PATH="/var/lib/grafana/dashboards/docker/04-docker-per-container-analytics.json"
 

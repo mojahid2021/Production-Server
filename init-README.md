@@ -25,7 +25,7 @@ git clone → npm install → pm2 start → nginx_add_site
 |---|---|
 | OS | Ubuntu 20.04, 22.04, or 24.04 LTS |
 | Access | Must run as root (`sudo`) |
-| Internet | Required (downloads NVM, Node.js, Prometheus, Grafana) |
+| Internet | Required (downloads NVM, Node.js, VictoriaMetrics) |
 | Fresh server | Recommended — works on existing servers too |
 
 ---
@@ -49,6 +49,8 @@ When run interactively, the script asks:
 1. **Username** — validated in real-time (checks format + checks if already exists)
 2. **Password** — type your own, or press Enter to auto-generate a secure 16-character password
 3. **Node.js version** — press Enter to accept the default (v20)
+4. **Additional Firewall Ports** — choose nginx (80/443), email, or custom ports
+5. **Memory Cushion & Swap Allocation** — displays current RAM and existing swap, provides an intelligent size recommendation (e.g. 2GB), allows custom sizing, and sets the physical RAM usage trigger (e.g. swap activates only after 90% RAM is utilized, `vm.swappiness=10`).
 
 A confirmation summary is shown before anything happens. You type `y` to proceed or `n` to cancel.
 
@@ -62,10 +64,13 @@ A confirmation summary is shown before anything happens. You type `y` to proceed
 | `-p PASSWORD` | Set a custom password | auto-generated |
 | `-k PUBKEY` | Install an SSH public key file | none |
 | `-n NODE_VER` | Node.js version: `18`, `20`, `22`, `lts/*` | `20` |
+| `--swap-size SIZE` | Set swap size: `2G`, `1G`, `4G`, `0` to skip | auto-detected |
+| `--swap-threshold %` | RAM % usage when swap activates (e.g. `90`) | `90%` |
+| `--swappiness VAL` | Direct kernel swappiness 0–100 | `10` |
 | `--no-nvm` | Skip NVM + Node.js installation | — |
 | `--no-pm2` | Skip PM2 installation | — |
 | `--no-fw` | Skip UFW firewall configuration | — |
-| `--no-mon` | Skip Grafana/Prometheus monitoring installation | — |
+| `--no-mon` | Skip Cockpit & VictoriaMetrics monitoring installation | — |
 | `-h` | Show help and exit | — |
 
 ---
@@ -326,17 +331,13 @@ nginx-logs    # tail -f /var/log/nginx/*.log
 
 ### 9. Monitoring — Full Stack
 
-The monitoring stack installed by `init.sh` provides metrics, logs, and a browser dashboard — all bound to localhost and accessed via SSH tunnel.
+The ultra-lean hybrid monitoring architecture installed by `init.sh` combines **Cockpit** for host management and log inspection with **VictoriaMetrics Single** for application time-series metrics. It consumes **~50–85 MB RAM total** (a ~96% reduction compared to traditional enterprise stacks) and all endpoints are bound strictly to localhost:
 
-| Service | Address | Purpose |
-|---|---|---|
-| node_exporter | `127.0.0.1:9100` | OS-level metrics (CPU, RAM, disk, network) |
-| PM2 exporter | `127.0.0.1:9209` | Per-app PM2 process metrics (auto-discovered) |
-| Prometheus | `127.0.0.1:9090` | Metrics database — 15-day retention |
-| Loki | `127.0.0.1:3100` | Log aggregation backend |
-| Promtail | `127.0.0.1:9080` | Log agent — syslog, auth, kern, PM2 app logs |
-| ClickHouse | `127.0.0.1:17123` | Short-term log analytics backend (2-day retention) |
-| Grafana | `127.0.0.1:13001` | Dashboard UI — metrics + logs |
+| Service | Address | Purpose | Memory |
+|---|---|---|---|
+| Cockpit | `127.0.0.1:9090` | Web Console — system management, journald logs, Docker | 0 MB (idle via socket) |
+| VictoriaMetrics | `127.0.0.1:8428` | Time-series TSDB & VMUI visual explorer | ~48 MB RAM cap |
+| PM2 exporter | `127.0.0.1:9209` | Per-app PM2 process metrics (auto-discovered) | ~35 MB RAM |
 
 #### Layer 1: `server_status` — Instant CLI Overview
 
@@ -344,7 +345,6 @@ Run from anywhere after login:
 
 ```bash
 server_status
-# alias: status
 ```
 
 Displays in one screen:
@@ -353,86 +353,60 @@ Displays in one screen:
 - **Disk** — used / total / percentage (green/yellow/red)
 - **Uptime**
 - **PM2 apps** — full `pm2 list` table
-- **Nginx active sites** — name, domain, and port for each
 - **Firewall (UFW)** — status summary
-- **Grafana** — status and SSH tunnel access instructions
+- **Cockpit** — status and SSH tunnel access instructions
+- **VictoriaMetrics & VMUI** — status and SSH tunnel access instructions
 
-#### Layer 2: PM2 Built-in Monitor
+#### Layer 2: Native Journald & Shell Log Helpers
 
-```bash
-pm2 monit   # live per-process CPU + memory in terminal
-pm2 logs    # live scrolling log output from all apps
-```
-
-#### Layer 3: Prometheus — Metrics Collection and Storage
-
-Prometheus is installed as a background service and collects system metrics from `node_exporter` and `PM2 exporter` every 15 seconds. Metrics are stored locally for 15 days.
-
-- **node_exporter** scrapes OS-level metrics (CPU, RAM, disk, network) from `127.0.0.1:9100`
-- **PM2 exporter** exposes per-app process metrics (status, CPU, RAM, restarts) from `127.0.0.1:9209`
-- **Prometheus** stores time-series data at `127.0.0.1:9090`
-- All services run as dedicated system users under systemd
-
-#### Layer 4: Loki + Promtail — Log Aggregation
-
-Loki is a log aggregation backend installed alongside Promtail, a log shipping agent.
-
-- **Promtail** (`127.0.0.1:9080`) reads `/var/log/syslog`, `/var/log/auth.log`, `/var/log/kern.log`, and all PM2 app log files
-- **Loki** (`127.0.0.1:3100`) stores and indexes the log streams for querying in Grafana
-- Query logs in Grafana → Explore → select Loki datasource
-
-```logql
-# All PM2 app logs
-{job="pm2"}
-
-# Only error lines from PM2 apps
-{job="pm2"} |= "error"
-
-# Authentication log (SSH logins, sudo)
-{job="auth"}
-
-# System syslog
-{job="syslog"}
-
-# Kernel messages
-{job="kern"}
-```
-
-#### Layer 5: ClickHouse — Short-Term Log Analytics
-
-ClickHouse is installed as a columnar analytics backend for fast structured log queries.
-
-- Listens on `127.0.0.1:17123` (HTTP) and `127.0.0.1:19000` (native TCP)
-- Stores PM2 app logs and system logs for 2 days
-- Enables analytical SQL queries over log data
-
-#### Layer 6: Grafana — Browser Dashboard
-
-Grafana is installed during provisioning and runs as a background service. It is bound to `127.0.0.1:13001` — not accessible from the internet. You access it through an SSH tunnel:
+Direct access to structured system and application logs with zero agent overhead:
 
 ```bash
-# Step 1: Run this on your LOCAL machine (laptop/PC):
-ssh -L 13001:localhost:13001 mojahid@your-server-ip
-
-# Step 2: Open in your browser:
-http://localhost:13001
-# Default login: admin / admin  ← change this on first login!
+sys_logs       # View recent system journal logs
+sys_errors     # View system error logs only (priority err..emerg)
+nginx_logs     # View Nginx access & error logs
+pm2_jlogs      # View PM2 systemd journal logs
+pm2 monit      # Live per-process CPU + memory in terminal
+pm2 logs       # Live scrolling log output from all apps
 ```
 
-Grafana comes pre-configured with:
-- **Prometheus** connected as the default data source
-- **Loki** connected as a log data source
-- **Node Exporter Full** dashboard (ID 1860) pre-loaded in the *System* folder
-- **PM2 Process Monitor** dashboard pre-loaded in the *Apps* folder
+#### Layer 3: Cockpit — Web-Based Host Management & Journal Logs
 
-The dashboard shows beautiful, interactive graphs updating every 15 seconds:
-- CPU usage (per core, overall, idle/system/user breakdown)
-- RAM and swap usage with history
-- Disk read/write speed and I/O utilisation
-- Network in/out bandwidth per interface
-- System load average (1m, 5m, 15m)
-- Per-process CPU and memory (PM2 apps)
-- Full alert support via Grafana's built-in Alerting UI
+Cockpit runs via `systemd` socket activation (`cockpit.socket`) bound strictly to `127.0.0.1:9090`. When not in use, it consumes **0 MB RAM**:
+
+```bash
+# Forward port over SSH
+ssh -L 9090:localhost:9090 deploy_user@<server-ip>
+
+# Open in browser:
+http://localhost:9090
+# Log in with your server user and password
+```
+
+Features:
+- **Overview:** Real-time interactive CPU, RAM, disk I/O, and network usage.
+- **Logs:** Search and filter `systemd-journald` logs by priority, time, and service unit.
+- **Services:** Inspect, start, stop, and restart any systemd service (PM2, Nginx, Docker).
+- **Terminal:** Interactive web terminal with full root/sudo access.
+- **Containers:** Integrated container management (when Docker/Podman is installed).
+- **Accounts & Updates:** Manage system accounts, SSH keys, and apply security package updates.
+
+#### Layer 4: VictoriaMetrics Single — Application Metrics & VMUI
+
+VictoriaMetrics is an ultra-fast, single-binary time-series database running on `127.0.0.1:8428`. It scrapes `pm2-prometheus-exporter` (`:9209`) and `docker` (`:9323`) on a relaxed 30s interval:
+
+```bash
+# Forward port over SSH
+ssh -L 8428:localhost:8428 deploy_user@<server-ip>
+
+# Open VMUI in browser:
+http://localhost:8428/vmui
+```
+
+Features:
+- **Built-in VMUI Explorer:** Graph, table, and JSON views with PromQL and MetricsQL support.
+- **15-Day Retention:** Gorilla-compressed local storage with minimal disk I/O.
+- **Ultra-low memory:** Runs comfortably in ~50 MB RAM with zero external dependencies.
 
 ---
 
@@ -528,7 +502,7 @@ Every login session is configured with sane, secure defaults written to `~/.depl
 | **PM2 startup is bulletproof** | Uses the exact NVM binary path — does not silently fail |
 | **Multi-project Nginx** | Host unlimited projects on one server |
 | **`nginx_add_site` helper** | Add a new project to Nginx in one command |
-| **Full monitoring stack** | Terminal status, PM2 monitor, Prometheus metrics, Loki log aggregation, ClickHouse analytics, and Grafana browser dashboard |
+| **Hybrid monitoring stack** | Terminal status, PM2 monitor, Cockpit web console (:9090), VictoriaMetrics time-series TSDB (:8428), and PM2 exporter |
 | **Both SSH auth methods** | Password and key — flexible for different workflows |
 | **Sudo is layered** | Common tasks need no password, sensitive operations do |
 | **Kernel hardening** | Protection applied at OS level, not just app level |
@@ -543,13 +517,13 @@ Every login session is configured with sane, secure defaults written to `~/.depl
 | Limitation | Explanation and workaround |
 |---|---|
 | **Ubuntu only** | Tested on Ubuntu 20.04, 22.04, 24.04. Other Debian-based distros may work but are not guaranteed |
-| **Requires internet** | NVM, Node.js, Prometheus, and Grafana are downloaded during provisioning. Offline servers must use `--no-nvm` and `--no-mon` and install manually |
+| **Requires internet** | NVM, Node.js, and VictoriaMetrics are downloaded during provisioning. Offline servers must use `--no-nvm` and `--no-mon` and install manually |
 | **One user per run** | Each run provisions one user. Run the script again with a different username to add another user |
 | **SSH password login is enabled** | More convenient but less secure than key-only. Add your public key with `-k` and consider disabling password auth in sshd after that |
 | **Root SSH login is blocked** | You cannot `ssh root@server` directly — this is intentional. Login as your user then run `sudo -i` |
 | **No database setup** | PostgreSQL, MySQL, Redis, MongoDB — you install and configure these separately |
 | **No CI/CD pipeline** | The script sets up the environment — connecting GitHub Actions or GitLab CI to this server is a separate step |
-| **Grafana has no alerts by default** | Grafana is installed for visibility. Email/Slack alerts require additional configuration in the Grafana UI under Alerting |
+| **Cockpit has no email alerts by default** | Cockpit provides live system status, logs, and service control. Alerts can be integrated via VictoriaMetrics vmalert if required |
 | **fail2ban covers SSH only** | Nginx brute force protection is not configured by default |
 | **No automatic SSL renewal check** | Certbot installs a renewal cron automatically, but verify it: `sudo certbot renew --dry-run` |
 | **NVM is per-user** | Other users on the same server do not share this Node.js installation. This is intentional — it provides isolation |
@@ -564,7 +538,7 @@ Be clear about the scope. You need to handle these separately:
 - **Set up a database** — PostgreSQL, MySQL, MongoDB, Redis — install these as root after provisioning.
 - **Point your domain** — Log into your domain registrar and set an A record pointing to your server IP.
 - **Configure CI/CD** — GitHub Actions, GitLab CI, Bitbucket Pipelines — set these up in your repo settings.
-- **Configure Grafana alerts** — Grafana runs but email/Slack notifications need manual setup in the Grafana UI under Alerting.
+- **Configure external alerting** — VictoriaMetrics and Cockpit provide metrics and live inspection; email/webhook alerts can be layered with vmalert.
 - **Backup strategy** — No automated backup system is configured.
 
 ---
@@ -667,15 +641,10 @@ All aliases are available immediately after login.
 | `/var/log/nginx/` | Nginx access and error logs (rotated every 30 days) |
 | `/usr/local/bin/nginx_add_site` | Helper to add a new project to Nginx |
 | `/usr/local/bin/server_status` | Quick server overview CLI tool |
-| `/etc/prometheus/prometheus.yml` | Prometheus scrape configuration |
-| `/var/lib/prometheus/` | Prometheus time-series data (15-day retention) |
-| `/etc/grafana/grafana.ini` | Grafana configuration (port 13001) |
-| `/etc/grafana/provisioning/` | Grafana datasource + dashboard provisioning |
-| `/var/lib/grafana/dashboards/` | Pre-provisioned Grafana dashboard JSON files |
-| `/etc/loki/loki.yaml` | Loki configuration |
-| `/var/lib/loki/` | Loki log storage |
-| `/etc/promtail/promtail.yaml` | Promtail log agent configuration |
-| `/etc/clickhouse-server/` | ClickHouse server configuration |
+| `/etc/cockpit/cockpit.conf` | Cockpit web console configuration (port 9090) |
+| `/etc/victoriametrics/scrape.yml` | VictoriaMetrics scrape configuration (PM2, Node, Docker) |
+| `/var/lib/victoria-metrics/` | VictoriaMetrics time-series TSDB data storage |
+| `/usr/local/bin/victoria-metrics` | VictoriaMetrics single binary |
 | `/etc/sudoers.d/90-<user>` | Sudo rules for the deploy user |
 | `/etc/fail2ban/jail.d/node-provision.conf` | fail2ban SSH jail config |
 | `/etc/sysctl.d/99-node-provision.conf` | Kernel hardening sysctl settings |
@@ -747,11 +716,15 @@ sudo ufw allow 8080/tcp
 sudo ufw status
 ```
 
-### Access Grafana dashboard
+### Access Cockpit Web Console & VictoriaMetrics
 ```bash
-# On your LOCAL machine:
-ssh -L 13001:localhost:13001 mojahid@your-server-ip
-# Then open: http://localhost:13001  (login: admin / admin)
+# 1. Access Cockpit (system management, hardware, services, journald logs):
+ssh -L 9090:localhost:9090 mojahid@your-server-ip
+# Then open: http://localhost:9090  (login with your deploy user credentials)
+
+# 2. Access VictoriaMetrics VMUI (time-series metrics explorer):
+ssh -L 8428:localhost:8428 mojahid@your-server-ip
+# Then open: http://localhost:8428/vmui
 ```
 
 ### Check fail2ban bans
@@ -832,7 +805,7 @@ cat /var/log/node_provision.log
 - **Password login is enabled** — convenient but weaker than key-only. If you add your SSH public key via `-k`, consider disabling password auth later: edit `/etc/ssh/sshd_config`, set `PasswordAuthentication no`, reload sshd.
 - **Root SSH login is permanently blocked** — `PermitRootLogin no` is enforced. To reach root: `ssh` as your deploy user, then `sudo -i`. This is intentional and should not be changed.
 - **The deploy user has full sudo** — the password for this user is effectively the key to the server. Store it in a secrets manager (Bitwarden, 1Password, etc.).
-- **Monitoring stack is localhost-only** — Grafana (13001), Prometheus (9090), Loki (3100), ClickHouse (17123), and node_exporter (9100) are all bound to 127.0.0.1. Access is always via SSH tunnel.
+- **Monitoring stack is localhost-only** — Cockpit (9090), VictoriaMetrics (8428), and pm2-prometheus-exporter (9209) are all bound strictly to 127.0.0.1. Access is always via SSH tunnel.
 - **fail2ban is active** — 5 failed SSH attempts = 1 hour IP ban. Adjust in `/etc/fail2ban/jail.d/node-provision.conf`.
 - **Nginx blocks secret files** — `.env`, `.git`, `.key`, `.pem`, `.sh` files are blocked at the Nginx level and return 404.
 - **Kernel hardening is applied** — SYN flood, IP spoofing, redirect attacks, and symlink exploits are all mitigated via sysctl.

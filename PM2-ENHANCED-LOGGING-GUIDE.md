@@ -14,7 +14,7 @@ When you run the `init.sh` provisioning script, **everything for PM2 logging is 
 | **Log format** | Timestamps (YYYY-MM-DD HH:mm:ss Z) | ✅ Yes |
 | **Logs directory** | `~/.pm2/logs/` created | ✅ Yes |
 | **Helper commands** | `pstart`, `plog_app`, `plog_errors` | ✅ Yes |
-| **Grafana integration** | Logs sent to Loki automatically | ✅ Yes |
+| **Metrics exporter** | Metrics scraped to VictoriaMetrics (:9209) | ✅ Yes |
 | **Global defaults** | Set for ALL apps | ✅ Yes |
 
 **Result**: From the moment PM2 is installed, **every app you start gets detailed logging automatically** — no configuration required!
@@ -39,7 +39,7 @@ pm2 save
 - ✅ Error logs at `~/.pm2/logs/myapp-error.log`  
 - ✅ Timestamps on every line
 - ✅ Auto-rotation (50MB files, 10 retained)
-- ✅ Grafana visibility
+- ✅ VictoriaMetrics & Cockpit visibility
 
 ---
 
@@ -101,7 +101,7 @@ When you start **any app** with `pstart` or `pm2 start`:
 |----------|----------|--------------|
 | `app-name-out.log` | Normal console.log output | ✅ Yes |
 | `app-name-error.log` | Errors, exceptions, warnings | ✅ Yes |
-| `app-name-combined.log` | Both (for Grafana) | ✅ Yes |
+| `app-name-combined.log` | Both (for inspection & search) | ✅ Yes |
 
 **Timestamps added automatically**:
 ```
@@ -148,7 +148,7 @@ When you use `pstart app.js`:
 4. Sets `--error ~/.pm2/logs/app-name-error.log`
 5. Enables `--log-date-format 'YYYY-MM-DD HH:mm:ss Z'`
 6. Starts the app with PM2
-7. Logs automatically sent to Grafana/Loki
+7. Metrics automatically exposed to VictoriaMetrics (:9209)
 
 **Zero config needed** — Just run and logs appear!
 
@@ -350,35 +350,44 @@ app1-out.log.2.gz
 
 ---
 
-## Grafana Integration (Automatic)
+## VictoriaMetrics & Cockpit Integration (Automatic)
 
-All logs are **automatically sent to Grafana** via Loki.
+PM2 metrics and system logs are automatically accessible without manual setup:
 
-### Access Grafana
+### 1. View PM2 Metrics in VictoriaMetrics (VMUI)
+
+All PM2 processes are scraped into VictoriaMetrics via `pm2-prometheus-exporter` on port `9209`:
 
 ```bash
-# SSH tunnel to Grafana
-ssh -L 3001:localhost:3001 username@server
+# SSH tunnel to VictoriaMetrics
+ssh -L 8428:localhost:8428 username@server
 
-# Open browser to http://localhost:3001
-# Login: admin / admin (change password immediately!)
+# Open browser to http://localhost:8428/vmui
 ```
 
-### Query PM2 Logs in Grafana
+**Useful PM2 Queries:**
+```promql
+# CPU usage per PM2 app (%)
+pm2_cpu{name=~".+"}
 
-1. Go to **Explore** tab
-2. Select **Loki** data source
-3. Run query:
+# Memory usage per PM2 app (MB)
+pm2_memory{name=~".+"} / 1024 / 1024
 
+# Process restart count
+pm2_restarts
+
+# App uptime in seconds
+pm2_uptime
 ```
-# All PM2 logs
-{job="pm2"}
 
-# Specific app
-{job="pm2", app="myapp"}
+### 2. View System & PM2 Logs in Cockpit
 
-# Just errors
-{job="pm2"} | json | level="error"
+```bash
+# SSH tunnel to Cockpit
+ssh -L 9090:localhost:9090 username@server
+
+# Open browser to http://localhost:9090
+# Login with your server user credentials → Navigate to "Logs"
 ```
 
 ---
@@ -391,7 +400,7 @@ ssh -L 3001:localhost:3001 username@server
 ✅ Log rotation configured  
 ✅ Logging format set  
 ✅ Helper commands created  
-✅ Grafana integration ready  
+✅ VictoriaMetrics metrics scraping ready
 
 ### Your First App (30 seconds)
 
@@ -405,7 +414,7 @@ pm2 save                  # Survive reboot
 - ✅ Separate output + error logs
 - ✅ Timestamps on every line  
 - ✅ Auto-rotation (50MB/day)
-- ✅ Grafana integration
+- ✅ VictoriaMetrics & Cockpit visibility
 - ✅ Error filtering available
 
 ---
@@ -571,29 +580,19 @@ grep "2026-03-30 14:[012][0-9]" ~/.pm2/logs/api-server-out.log
 
 ---
 
-## Grafana Integration
+## Metrics & Web Console Access
 
-All PM2 logs are automatically sent to Loki (log aggregation backend).
+PM2 metrics are stored in VictoriaMetrics and host services are managed via Cockpit.
 
-### View in Grafana
+### View PM2 Metrics in VictoriaMetrics
+1. Forward port: `ssh -L 8428:localhost:8428 username@server`
+2. Open `http://localhost:8428/vmui`
+3. Enter queries like `pm2_cpu` or `pm2_memory` to graph performance over time.
 
-1. Open Grafana: `http://localhost:3001` (admin/admin)
-2. Go to **Explore** → Select **Loki** as data source
-3. Run queries:
-
-```
-# All PM2 logs
-{job="pm2"}
-
-# Specific app
-{job="pm2", filename="api-server-combined.log"}
-
-# Just errors
-{job="pm2", filename="api-server-error.log"}
-
-# Search for keyword
-{job="pm2"} |= "database error"
-```
+### View Logs in Cockpit
+1. Forward port: `ssh -L 9090:localhost:9090 username@server`
+2. Open `http://localhost:9090` and log in with your Linux credentials.
+3. Access real-time system logs, service statuses, and resource usage.
 
 ---
 
@@ -695,10 +694,10 @@ ls -la ~/.pm2/logs/
 # -rw------- 1 username username 12M Mar 30 ...
 ```
 
-To allow Promtail to read PM2 logs:
+To inspect logs from other services:
 ```bash
-# Already configured by init.sh — Promtail user has ACL access
-getfacl ~/.pm2/logs/
+# Read system and journal logs
+journalctl -u nginx --no-pager | tail -50
 ```
 
 ---
@@ -764,9 +763,9 @@ pm2 set pm2-logrotate:cron '0 2 * * *'  # 2 AM instead of midnight
 | Auto-rotation | ✅ | 50MB size or daily (whichever first) |
 | Error separation | ✅ | Errors in dedicated `-error.log` files |
 | Retention | ✅ | 10 old files kept + compressed |
-| Grafana integration | ✅ | All logs sent to Loki automatically |
+| VictoriaMetrics | ✅ | Metrics scraped via pm2-prometheus-exporter (:9209) |
 | CLI aliases | ✅ | `plog_*` commands for easy access |
-| Log aggregation | ✅ | `{job="pm2"}` in Grafana Loki |
+| Cockpit UI | ✅ | System inspection and log viewer (:9090) |
 
 ---
 
