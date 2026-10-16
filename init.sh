@@ -2289,10 +2289,14 @@ setup_firewall() {
         warn "UFW not installed: apt-get install -y ufw"; section_end; return
     fi
 
-    # Detect SSH port from sshd_config
-    ssh_port=$(grep -i "^port" /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | head -1)
-    if [[ -z "$ssh_port" || ! "$ssh_port" =~ ^[0-9]+$ ]]; then
-        ssh_port=22
+    # Detect SSH port from sshd_config (fallback to 22 safely without pipefail trigger)
+    local ssh_port=22
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        local detected_port
+        detected_port=$(awk '/^[Pp]ort[ \t]+[0-9]+/ {print $2; exit}' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null || true)
+        if [[ -n "$detected_port" && "$detected_port" =~ ^[0-9]+$ ]]; then
+            ssh_port="$detected_port"
+        fi
     fi
 
     # Enforce IPv6 filtering in UFW so IPv6 cannot bypass firewall
