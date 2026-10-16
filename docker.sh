@@ -5,7 +5,7 @@
 # ╠══════════════════════════════════════════════════════════════════════════════╣
 # ║                                                                              ║
 # ║  COMPANION TO: init.sh (Node.js Production Server Provisioner)               ║
-# ║  Integrates with Cockpit (Web Console) + VictoriaMetrics (Metrics)           ║
+# ║  Integrates with Cockpit (Web Console)                                       ║
 # ║                                                                              ║
 # ║  WHAT THIS DOES                                                              ║
 # ║  01. Preflight — checks OS, root, deploy user, and monitoring components     ║
@@ -161,12 +161,12 @@ show_banner() {
     printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
             "  🐳  docker.sh  —  Docker CE + Full Monitoring Integration  v${SCRIPT_VERSION}"
     printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Docker · Compose v2 · BuildKit · cAdvisor · Cockpit · VictoriaMetrics"
+            "  Docker · Compose v2 · BuildKit · cAdvisor · Cockpit Web Console"
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
     printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Companion to init.sh — integrates with Cockpit & VictoriaMetrics"
+            "  Companion to init.sh — integrates with Cockpit Web Console"
     printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  node_exporter already running from init.sh — will NOT be touched"
+            "  Cockpit Web Console running from init.sh (0 MB idle RAM)"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 }
@@ -238,7 +238,7 @@ preflight() {
         fi
 
         if $COCKPIT_EXISTS || $VM_EXISTS; then
-            ok "Host monitoring active (Cockpit / VictoriaMetrics) — no node_exporter needed."
+            ok "Host monitoring active (Cockpit Web Console) — no node_exporter needed."
         fi
     fi
 
@@ -832,16 +832,13 @@ verify_all() {
 print_summary() {
     echo ""
     echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${GRN}${BOLD}%-76s${R}${BLU}${BOLD}║${R}
-" \
-            "  ✔  docker.sh Complete — Docker CE + Cockpit & VictoriaMetrics Ready"
+    printf  "  ${BLU}${BOLD}║${R}${GRN}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
+            "  ✔  docker.sh Complete — Docker CE + Cockpit Web Console Ready"
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
 
-    _row() { printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${WHT}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}
-" "$1" "$2"; }
+    _row() { printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${WHT}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" "$1" "$2"; }
     _sep() { echo -e "  ${BLU}${BOLD}╠${HR2}╣${R}"; }
-    _hdr() { printf "  ${BLU}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}
-" "$1"; }
+    _hdr() { printf "  ${BLU}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" "$1"; }
 
     _hdr "Docker Stack"
     _sep
@@ -855,25 +852,27 @@ print_summary() {
     _sep
     _hdr "Monitoring & Management Integration"
     _sep
-    _row "cAdvisor"         "Container CPU/RAM/net/disk → :${CADVISOR_PORT}"
-    _row "Cockpit UI"       "Container management & logs → http://localhost:9090"
-    _row "VictoriaMetrics"  "Time-series metrics & VMUI → http://localhost:8428/vmui"
+    _row "Cockpit UI"       "Container management & logs → https://localhost:9090"
+    if $SETUP_CADVISOR; then
+        _row "cAdvisor"     "Container CPU/RAM/net/disk → :${CADVISOR_PORT}"
+    fi
+    if $VM_EXISTS; then
+        _row "VictoriaMetrics" "Time-series metrics & VMUI → http://localhost:8428/vmui"
+    fi
 
     _sep
     _hdr "🔭  Access Management & Metrics (SSH Tunnels)"
     _sep
-    printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}
-" \
-        "Cockpit GUI:         ssh -L 9090:localhost:9090 ${DEPLOY_USER}@<server-ip>"
-    printf "  ${BLU}${BOLD}║${R}  ${WHT}%-74s${R}  ${BLU}${BOLD}║${R}
-" \
-        "                     http://localhost:9090  (Login as ${DEPLOY_USER})"
-    printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}
-" \
-        "VictoriaMetrics VMUI: ssh -L 8428:localhost:8428 ${DEPLOY_USER}@<server-ip>"
-    printf "  ${BLU}${BOLD}║${R}  ${WHT}%-74s${R}  ${BLU}${BOLD}║${R}
-" \
-        "                     http://localhost:8428/vmui"
+    printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
+        "Cockpit GUI:         ssh -L 9090:127.0.0.1:9090 ${DEPLOY_USER}@<server-ip>"
+    printf "  ${BLU}${BOLD}║${R}  ${WHT}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
+        "                     https://localhost:9090  (Login as ${DEPLOY_USER})"
+    if $VM_EXISTS; then
+        printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
+            "VictoriaMetrics VMUI: ssh -L 8428:localhost:8428 ${DEPLOY_USER}@<server-ip>"
+        printf "  ${BLU}${BOLD}║${R}  ${WHT}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
+            "                     http://localhost:8428/vmui"
+    fi
 
     _sep
     _hdr "🐳  Docker Quick Reference"

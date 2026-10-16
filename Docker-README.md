@@ -1,7 +1,7 @@
-# docker.sh — Docker CE + Cockpit & VictoriaMetrics Integration
+# docker.sh — Docker CE + Cockpit Web Console Integration
 
 > **Companion script to `init.sh`.**
-> Installs Docker CE and seamlessly connects container management into Cockpit and container metrics into VictoriaMetrics — with zero manual steps.
+> Installs Docker CE and seamlessly connects container management into Cockpit Web Console — with zero manual steps.
 
 ---
 
@@ -15,7 +15,6 @@
 - [Full Architecture](#-full-architecture)
 - [Feature Breakdown](#-feature-breakdown-all-13-steps)
 - [Cockpit Container Management](#-cockpit-container-management)
-- [VictoriaMetrics — Docker Metrics Queries](#-victoriametrics--docker-metrics-queries)
 - [Docker Quick Reference](#-docker-quick-reference)
 - [Troubleshooting](#-troubleshooting)
 - [FAQ](#-faq)
@@ -24,21 +23,20 @@
 
 ## 🔍 Overview
 
-`docker.sh` provides production Docker setup and modern observability:
+`docker.sh` provides production Docker setup and modern zero-overhead host integration:
 
 **Part 1 — Docker CE Installation**
 Installs the latest stable Docker CE from Docker's official APT repository, along with Compose v2, BuildKit, containerd, ctop, Lazydocker, and Docker Scout.
 
-**Part 2 — Lean Monitoring & Management Integration**
-- **Cockpit UI Integration:** Enables container management inside the Cockpit Web Console. View running containers, inspect logs, monitor live CPU/RAM usage per container, and start/stop/restart containers from a browser.
-- **VictoriaMetrics Integration:** Configures VictoriaMetrics to automatically scrape Docker daemon engine metrics (`:9323`) and cAdvisor container metrics (`:8080`).
+**Part 2 — Zero-Overhead Management Integration**
+- **Cockpit UI Integration:** Enables container management directly inside the Cockpit Web Console. View running containers, inspect logs, monitor live CPU/RAM usage per container, and start/stop/restart containers from a browser (0 MB idle RAM via systemd socket activation).
+- **Ecosystem Monitoring Tools:** Includes terminal-based real-time monitors (`ctop`, `lazydocker`) and native daemon metrics on `:9323`.
 
 ```
 init.sh installed:               docker.sh adds:
-  Cockpit           :9090   ←      Cockpit Container Management (cockpit-podman)
-  VictoriaMetrics   :8428   ←      docker_engine metrics (:9323) [30s scrape]
-  PM2 exporter      :9209          Native Docker Engine metrics (:9323)
-  (all untouched)                  Optional: cAdvisor (:8080 via --with-cadvisor)
+  Cockpit Web Console :9090  ←     Cockpit Container Management (cockpit-podman)
+  Node.js PM2 GUI Extension        Native Docker Engine metrics (:9323)
+  (0 MB idle RAM)                  Optional: cAdvisor (:8080 via --with-cadvisor)
 ```
 
 ---
@@ -50,11 +48,10 @@ init.sh installed:               docker.sh adds:
 | Component | Installed By | Path / Port | Role |
 |---|---|---|---|
 | Ubuntu 20.04 / 22.04 / 24.04 | — | — | Target OS |
-| Cockpit | `init.sh` | `:9090` | Web Console & container GUI |
-| VictoriaMetrics | `init.sh` | `/etc/victoriametrics/scrape.yml` · `:8428` | Metrics storage & VMUI |
+| Cockpit | `init.sh` | `:9090` | Web Console & container GUI (0 MB idle) |
 | Deploy user | `init.sh` | `/home/<username>` | Added to `docker` group |
 
-> If Cockpit or VictoriaMetrics are not detected, `docker.sh` installs Docker CE normally and enables native engine metrics on `:9323`.
+> If Cockpit is not detected, `docker.sh` installs Docker CE normally and enables native engine metrics on `:9323`.
 
 ---
 
@@ -84,12 +81,8 @@ newgrp docker
 docker ps
 
 # Access Cockpit container GUI:
-ssh -L 9090:localhost:9090 <username>@<server-ip>
-# Open http://localhost:9090 → Containers
-
-# Access VictoriaMetrics VMUI for Docker metrics:
-ssh -L 8428:localhost:8428 <username>@<server-ip>
-# Open http://localhost:8428/vmui
+ssh -L 9090:127.0.0.1:9090 <username>@<server-ip>
+# Open https://localhost:9090 → Containers
 ```
 
 ---
@@ -119,8 +112,8 @@ ssh -L 8428:localhost:8428 <username>@<server-ip>
 
 | Component | Port | Role |
 |---|---|---|
-| `cockpit-podman` | `127.0.0.1:9090` | Cockpit Web UI container manager |
-| `cadvisor` | `127.0.0.1:8080` | Per-container CPU/RAM/net/disk metrics container |
+| `cockpit-podman` | `127.0.0.1:9090` | Cockpit Web UI container manager (0 MB idle RAM) |
+| `cadvisor` (Optional) | `127.0.0.1:8080` | Optional per-container metrics (`--with-cadvisor`) |
 | `docker_engine` | `127.0.0.1:9323` | Native Docker daemon Prometheus metrics |
 
 ---
@@ -130,7 +123,6 @@ ssh -L 8428:localhost:8428 <username>@<server-ip>
 | init.sh Component | docker.sh Behavior |
 |---|---|
 | Cockpit (`:9090`) | **Extended.** Enables the Containers tab in Cockpit Web Console. |
-| VictoriaMetrics (`:8428`) | **Appended.** `docker_engine` and `cadvisor` scrape targets added. |
 | Deploy user | **Extended.** Added to `docker` group so they can run Docker without `sudo`. |
 | `server_status` | **Integrated.** Running containers are automatically displayed in the status output. |
 
@@ -140,25 +132,24 @@ ssh -L 8428:localhost:8428 <username>@<server-ip>
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│                         Your Ubuntu Server                          │
+│                         Your Ubuntu Server                         │
 │                                                                    │
-│  ┌──── HOST MANAGEMENT (Cockpit) ─────────────────────────────┐   │
+│  ┌──── HOST & APPLICATION MANAGEMENT (Cockpit Web Console) ───┐   │
 │  │                                                             │   │
-│  │  Cockpit Web Console :9090                                  │   │
-│  │  - Interactive Containers Tab (start/stop/restart/logs)     │   │
-│  │  - Web Terminal                                             │   │
-│  │  - Systemd service control                                  │   │
+│  │  Cockpit Socket :9090 (0 MB Idle RAM)                       │   │
+│  │  ├── Host Overview: Real-time CPU, RAM, Disk I/O, Network   │   │
+│  │  ├── Node.js (PM2): Process table, actions & live logs      │   │
+│  │  ├── Containers Tab: Inspect, logs, start/stop/restart      │   │
+│  │  ├── Systemd Services & Journald Log Search                 │   │
+│  │  └── Interactive Root Web Terminal                          │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                    │
-│  ┌──── METRICS OBSERVABILITY (VictoriaMetrics) ───────────────┐   │
+│  ┌──── TERMINAL & CLI ECOSYSTEM ──────────────────────────────┐   │
 │  │                                                             │   │
-│  │  VictoriaMetrics Single :8428                               │   │
-│  │  Scrapes (30s interval):                                    │   │
-│  │   ├── Docker Engine daemon metrics :9323                    │   │
-│  │   ├── PM2 apps metrics :9209                                │   │
-│  │   └── Optional: cAdvisor container :8080                    │   │
+│  │  • ctop       — Live container top-like monitor             │   │
+│  │  • lazydocker — Full terminal interactive Docker manager    │   │
+│  │  • server_status — CLI server health overview               │   │
 │  │                                                             │   │
-│  │  Visual Explorer: http://localhost:8428/vmui                │   │
 │  └─────────────────────────────────────────────────────────────┘   │
 │                                                                    │
 └────────────────────────────────────────────────────────────────────┘
@@ -170,7 +161,7 @@ ssh -L 8428:localhost:8428 <username>@<server-ip>
 
 | Step | Name | Detail |
 |---|---|---|
-| 01 | Preflight | Checks root, OS, detects deploy user, verifies Cockpit & VictoriaMetrics from `init.sh` |
+| 01 | Preflight | Checks root, OS, detects deploy user, verifies Cockpit from `init.sh` |
 | 02 | Remove old packages | Purges `docker.io`, `docker-engine`, `podman-docker`, etc. Upgrades if already installed. |
 | 03 | Prerequisites | Installs `curl`, `gnupg`, `jq`, `lsb-release`, `bash-completion` |
 | 04 | Docker APT repo | Adds official `download.docker.com` signed repo with GPG key in `/etc/apt/keyrings/` |
@@ -179,31 +170,10 @@ ssh -L 8428:localhost:8428 <username>@<server-ip>
 | 07 | Docker group | `usermod -aG docker <deploy_user>` — no more `sudo docker` |
 | 08 | Ecosystem tools | ctop, Lazydocker, Docker Scout, bash completion |
 | 09 | Cockpit integration | Installs `cockpit-podman` to surface container management in Cockpit Web Console |
-| 10 | cAdvisor | Deploys container bound to `127.0.0.1:8080` — per-container metrics with compose labels |
-| 11 | Scrape config patch | Configures `/etc/victoriametrics/scrape.yml` (or Prometheus fallback) with `docker_engine` & `cadvisor` |
+| 10 | cAdvisor (Optional) | Deploys container bound to `127.0.0.1:8080` when requested |
+| 11 | Scrape config patch | Checks for scrape targets if TSDB is present |
 | 12 | Verify | Smoke test (`hello-world`), endpoint and systemd checks for all components |
-| 13 | Summary | Full reference card with commands, PromQL queries, and SSH tunnel instructions |
-
----
-
-## 📈 VictoriaMetrics VMUI Metrics Exploration
-
-After running `docker.sh`, open VictoriaMetrics VMUI via SSH tunnel:
-```bash
-ssh -L 8428:localhost:8428 deploy_user@<server-ip>
-# Open http://localhost:8428/vmui
-```
-
-### Useful Metrics & Queries:
-
-| Metric Target | PromQL Query | Description |
-|---|---|---|
-| **Daemon Health** | `engine_daemon_engine_info` | Docker daemon version & architecture |
-| **Container Count** | `engine_daemon_container_states_containers{state="running"}` | Number of active containers |
-| **Per-Container CPU** | `rate(container_cpu_usage_seconds_total[1m]) * 100` | Real-time CPU % per container from cAdvisor |
-| **Container Memory** | `container_memory_working_set_bytes` | Working set RAM usage per container |
-| **Container Network** | `rate(container_network_receive_bytes_total[1m])` | Network ingress throughput per container |
-| **Host + Container Overview** | `node_memory_Active_bytes` vs `sum(container_memory_working_set_bytes)` | Host RAM vs total container RAM |
+| 13 | Summary | Full reference card with commands, Docker commands, and SSH tunnel instructions |
 
 ---
 
@@ -213,8 +183,8 @@ When `docker.sh` completes, container management is integrated directly into the
 
 Access Cockpit via SSH tunnel:
 ```bash
-ssh -L 9090:localhost:9090 deploy_user@<server-ip>
-# Open http://localhost:9090 → Containers
+ssh -L 9090:127.0.0.1:9090 deploy_user@<server-ip>
+# Open https://localhost:9090 → Containers
 ```
 
 ### Key Capabilities in Cockpit UI:
@@ -367,9 +337,9 @@ docker logs cadvisor --tail 20       # cAdvisor logs
 |---|---|---|
 | 1 | **init.sh-aware** | Integrates cleanly with Cockpit and VictoriaMetrics from `init.sh` |
 | 2 | **Zero-overhead GUI** | Cockpit uses systemd socket activation — 0 MB idle RAM for web UI |
-| 3 | **Safe scrape patching** | Configures `/etc/victoriametrics/scrape.yml` with timestamped backup |
+| 3 | **Docker CLI & TUI Ecosystem** | Includes ctop, Lazydocker, and BuildKit pre-configured |
 | 4 | **Same visual style as init.sh** | Identical colors, section headers, box borders — looks like one suite |
-| 5 | **Standard SSH tunnels** | Cockpit (`:9090`) and VictoriaMetrics (`:8428`) bound safely to localhost |
+| 5 | **Standard SSH tunnels** | Cockpit (`:9090`) bound safely to localhost (`127.0.0.1`) |
 | 6 | **Idempotent** | Safe to re-run — detects existing installs and upgrades cleanly |
 | 7 | **BuildKit on by default** | Faster, parallel, layer-cached builds without extra flags |
 | 8 | **Log rotation built-in** | daemon.json caps container logs at 20MB × 5 files — disk won't fill |
@@ -377,9 +347,9 @@ docker logs cadvisor --tail 20       # cAdvisor logs
 | 10 | **Native systemd logs** | Container logs available in Cockpit and journald without heavy agents |
 | 11 | **cAdvisor labels compose** | `compose_project` and `compose_service` labels promoted to metrics |
 | 12 | **Graceful optional failures** | ctop/Lazydocker/Scout failures emit warnings, never block Docker install |
-| 13 | **Single-binary metrics** | VictoriaMetrics uses ~50MB RAM compared to Prometheus/Grafana (~1.8GB) |
+| 13 | **Zero idle footprint** | Cockpit uses 0 MB idle RAM via socket activation, eliminating continuous background monitoring daemons |
 | 14 | **Smoke tested** | `hello-world` container run at end confirms full Docker stack works |
-| 15 | **Comprehensive summary** | Summary card includes PromQL examples, Docker commands, access instructions |
+| 15 | **Comprehensive summary** | Summary card includes Docker commands and SSH tunnel instructions |
 
 ---
 
@@ -387,7 +357,7 @@ docker logs cadvisor --tail 20       # cAdvisor logs
 
 | # | Con | Detail |
 |---|---|---|
-| 1 | **Requires init.sh first** | Monitoring scrape configuration is skipped if VictoriaMetrics/Prometheus aren't present |
+| 1 | **Requires init.sh first** | Integrates with deploy user and Cockpit Web Console created by `init.sh` |
 | 2 | **Ubuntu/Debian only** | No support for CentOS, Fedora, RHEL, Arch, or Alpine |
 | 3 | **Overwrites daemon.json** | Existing `/etc/docker/daemon.json` is replaced (backup is saved) |
 | 4 | **No version pinning** | Installs latest stable Docker at runtime — not reproducible for locked CI/CD |

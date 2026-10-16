@@ -70,7 +70,7 @@ A confirmation summary is shown before anything happens. You type `y` to proceed
 | `--no-nvm` | Skip NVM + Node.js installation | — |
 | `--no-pm2` | Skip PM2 installation | — |
 | `--no-fw` | Skip UFW firewall configuration | — |
-| `--no-mon` | Skip Cockpit & VictoriaMetrics monitoring installation | — |
+| `--no-mon` | Skip Cockpit Web Console monitoring installation | — |
 | `-h` | Show help and exit | — |
 
 ---
@@ -329,33 +329,35 @@ nginx-logs    # tail -f /var/log/nginx/*.log
 
 ---
 
-### 9. Monitoring — Full Stack
+### 9. Monitoring — Cockpit Web Console + Node.js (PM2) GUI (0 MB Idle RAM)
 
-The ultra-lean hybrid monitoring architecture installed by `init.sh` combines **Cockpit** for host management and log inspection with **VictoriaMetrics Single** for application time-series metrics. It consumes **~50–85 MB RAM total** (a ~96% reduction compared to traditional enterprise stacks) and all endpoints are bound strictly to localhost:
+`init.sh` implements a **zero-idle-overhead** monitoring architecture that completely eliminates background monitoring daemons like VictoriaMetrics, Prometheus, Loki, ClickHouse, and `node_exporter`.
 
-| Service | Address | Purpose | Memory |
-|---|---|---|---|
-| Cockpit | `127.0.0.1:9090` | Web Console — system management, journald logs, Docker | 0 MB (idle via socket) |
-| VictoriaMetrics | `127.0.0.1:8428` | Time-series TSDB & VMUI visual explorer | ~48 MB RAM cap |
-| PM2 exporter | `127.0.0.1:9209` | Per-app PM2 process metrics (auto-discovered) | ~35 MB RAM |
+Instead, it couples **Cockpit** (systemd socket-activated host management) with a custom **Native Cockpit Node.js (PM2) GUI extension**. When you are not actively viewing the web console, the monitoring system consumes **0 MB RAM**:
+
+| Service | Address | Purpose | Memory Footprint |
+|---|---|---|:---:|
+| **Cockpit Web Console** | `127.0.0.1:9090` | Host management, hardware charts, journald logs, Docker | **0 MB** (socket-activated) |
+| **Node.js (PM2) Extension** | Inside Cockpit | Process monitor, start/stop/restart, live log viewer | **0 MB** (on-demand CLI bridge) |
+| **Native journald** | Local host | System & app log indexing with 150MB limit & 30MB buffer | **~0 MB** (native kernel service) |
 
 #### Layer 1: `server_status` — Instant CLI Overview
 
-Run from anywhere after login:
+Run from anywhere in your shell after login:
 
 ```bash
 server_status
 ```
 
 Displays in one screen:
-- **CPU load** (1-minute average) with colour coding
-- **Memory** — used / total / percentage (green/yellow/red)
+- **CPU load** (1-minute average) with color coding
+- **Physical Memory** — used / total / percentage (green/yellow/red)
+- **Swap Memory & Trigger** — used / total and RAM threshold trigger percentage
 - **Disk** — used / total / percentage (green/yellow/red)
 - **Uptime**
-- **PM2 apps** — full `pm2 list` table
-- **Firewall (UFW)** — status summary
-- **Cockpit** — status and SSH tunnel access instructions
-- **VictoriaMetrics & VMUI** — status and SSH tunnel access instructions
+- **PM2 apps** — full `pm2 list` status table
+- **Firewall (UFW)** — active status summary
+- **Cockpit Web Console** — status and SSH tunnel access instructions
 
 #### Layer 2: Native Journald & Shell Log Helpers
 
@@ -368,45 +370,43 @@ nginx_logs     # View Nginx access & error logs
 pm2_jlogs      # View PM2 systemd journal logs
 pm2 monit      # Live per-process CPU + memory in terminal
 pm2 logs       # Live scrolling log output from all apps
+tunnel         # Prints the exact SSH tunneling command to open Cockpit
 ```
 
 #### Layer 3: Cockpit — Web-Based Host Management & Journal Logs
 
-Cockpit runs via `systemd` socket activation (`cockpit.socket`) bound strictly to `127.0.0.1:9090`. When not in use, it consumes **0 MB RAM**:
+Cockpit runs via `systemd` socket activation (`cockpit.socket`) bound strictly to `127.0.0.1:9090`. When not in use, the daemon stops and consumes **0 MB RAM**:
 
 ```bash
-# Forward port over SSH
-ssh -L 9090:localhost:9090 deploy_user@<server-ip>
+# Forward port over SSH from your local computer:
+ssh -L 9090:127.0.0.1:9090 deploy_user@<server-ip>
 
 # Open in browser:
-http://localhost:9090
-# Log in with your server user and password
+https://localhost:9090
+# Log in with your server deploy user and password (or root)
 ```
 
 Features:
-- **Overview:** Real-time interactive CPU, RAM, disk I/O, and network usage.
+- **Host Overview:** Real-time interactive CPU, RAM, disk I/O, and network usage graphs.
 - **Logs:** Search and filter `systemd-journald` logs by priority, time, and service unit.
 - **Services:** Inspect, start, stop, and restart any systemd service (PM2, Nginx, Docker).
 - **Terminal:** Interactive web terminal with full root/sudo access.
-- **Containers:** Integrated container management (when Docker/Podman is installed).
+- **Containers:** Integrated container management via `cockpit-podman` (when `docker.sh` is run).
 - **Accounts & Updates:** Manage system accounts, SSH keys, and apply security package updates.
 
-#### Layer 4: VictoriaMetrics Single — Application Metrics & VMUI
+#### Layer 4: Native Cockpit Node.js (PM2) GUI Extension
 
-VictoriaMetrics is an ultra-fast, single-binary time-series database running on `127.0.0.1:8428`. It scrapes `pm2-prometheus-exporter` (`:9209`) and `docker` (`:9323`) on a relaxed 30s interval:
-
-```bash
-# Forward port over SSH
-ssh -L 8428:localhost:8428 deploy_user@<server-ip>
-
-# Open VMUI in browser:
-http://localhost:8428/vmui
-```
+Installed directly into `/usr/share/cockpit/node-pm2/`, this custom PatternFly-styled extension interfaces with `/usr/local/bin/pm2-admin` to manage your Node.js apps without needing heavy external daemons or Prometheus exporters:
 
 Features:
-- **Built-in VMUI Explorer:** Graph, table, and JSON views with PromQL and MetricsQL support.
-- **15-Day Retention:** Gorilla-compressed local storage with minimal disk I/O.
-- **Ultra-low memory:** Runs comfortably in ~50 MB RAM with zero external dependencies.
+- **Stat Cards:** Real-time summary cards displaying Online Apps, Total Restarts, Total App Memory, and Average CPU.
+- **Application Controls:** Interactive table listing all PM2 apps with status badges, PID, uptime, memory, CPU, and one-click actions:
+  - **Restart** — Restart individual application
+  - **Stop** — Gracefully stop application
+  - **Start** — Start stopped application
+  - **View Logs** — Opens a live 100-line log tail modal
+- **Global Actions:** **Restart All** and **Save State** (`pm2 save`) buttons.
+- **Auto-Refresh:** Polls PM2 status every 3 seconds while the tab is open, stopping immediately when you navigate away.
 
 ---
 
@@ -502,7 +502,7 @@ Every login session is configured with sane, secure defaults written to `~/.depl
 | **PM2 startup is bulletproof** | Uses the exact NVM binary path — does not silently fail |
 | **Multi-project Nginx** | Host unlimited projects on one server |
 | **`nginx_add_site` helper** | Add a new project to Nginx in one command |
-| **Hybrid monitoring stack** | Terminal status, PM2 monitor, Cockpit web console (:9090), VictoriaMetrics time-series TSDB (:8428), and PM2 exporter |
+| **Zero-idle-overhead monitoring** | Instant terminal status, PM2 CLI monitor, and Cockpit web console (:9090) with native Node.js PM2 GUI (0 MB idle RAM) |
 | **Both SSH auth methods** | Password and key — flexible for different workflows |
 | **Sudo is layered** | Common tasks need no password, sensitive operations do |
 | **Kernel hardening** | Protection applied at OS level, not just app level |
@@ -517,7 +517,7 @@ Every login session is configured with sane, secure defaults written to `~/.depl
 | Limitation | Explanation and workaround |
 |---|---|
 | **Ubuntu only** | Tested on Ubuntu 20.04, 22.04, 24.04. Other Debian-based distros may work but are not guaranteed |
-| **Requires internet** | NVM, Node.js, and VictoriaMetrics are downloaded during provisioning. Offline servers must use `--no-nvm` and `--no-mon` and install manually |
+| **Requires internet** | NVM and Node.js are downloaded during provisioning. Offline servers must use `--no-nvm` and `--no-mon` and install manually |
 | **One user per run** | Each run provisions one user. Run the script again with a different username to add another user |
 | **SSH password login is enabled** | More convenient but less secure than key-only. Add your public key with `-k` and consider disabling password auth in sshd after that |
 | **Root SSH login is blocked** | You cannot `ssh root@server` directly — this is intentional. Login as your user then run `sudo -i` |
@@ -804,8 +804,7 @@ cat /var/log/node_provision.log
 
 - **Password login is enabled** — convenient but weaker than key-only. If you add your SSH public key via `-k`, consider disabling password auth later: edit `/etc/ssh/sshd_config`, set `PasswordAuthentication no`, reload sshd.
 - **Root SSH login is permanently blocked** — `PermitRootLogin no` is enforced. To reach root: `ssh` as your deploy user, then `sudo -i`. This is intentional and should not be changed.
-- **The deploy user has full sudo** — the password for this user is effectively the key to the server. Store it in a secrets manager (Bitwarden, 1Password, etc.).
-- **Monitoring stack is localhost-only** — Cockpit (9090), VictoriaMetrics (8428), and pm2-prometheus-exporter (9209) are all bound strictly to 127.0.0.1. Access is always via SSH tunnel.
+- **Monitoring console is localhost-only** — Cockpit Web Console (9090) is bound strictly to `127.0.0.1`. Access is always via encrypted SSH port forwarding tunnel.
 - **fail2ban is active** — 5 failed SSH attempts = 1 hour IP ban. Adjust in `/etc/fail2ban/jail.d/node-provision.conf`.
 - **Nginx blocks secret files** — `.env`, `.git`, `.key`, `.pem`, `.sh` files are blocked at the Nginx level and return 404.
 - **Kernel hardening is applied** — SYN flood, IP spoofing, redirect attacks, and symlink exploits are all mitigated via sysctl.

@@ -65,13 +65,11 @@ sudo ./init.sh
 | Sudo | Full root access (with password) + NOPASSWD for PM2/apt |
 | NVM + Node.js | Selected version via NVM |
 | PM2 | Process manager with bulletproof systemd startup |
-| PM2 exporter | Prometheus metrics for all PM2 apps (auto-discovered on `:9209`) |
-| Cockpit | Web management console & real-time hardware/log viewer on `127.0.0.1:9090` (0 MB idle RAM) |
-| VictoriaMetrics | Ultra-lightweight time-series TSDB & VMUI on `127.0.0.1:8428` (48 MB RAM cap) |
+| Cockpit Web Console | System management, journald logs & native Node.js PM2 GUI on `127.0.0.1:9090` (0 MB idle RAM) |
 | Native journald | System & app log indexing with compact 150MB limit & 30MB buffer |
-| Kernel hardening | sysctl — SYN flood, IP spoof, file descriptor tuning |
+| Kernel hardening | sysctl — SYN flood, IP spoof, file descriptor tuning, memory cushion |
 | fail2ban | SSH brute-force protection (ban after 5 failures) |
-| UFW firewall | SSH open; management & monitoring ports bound to localhost |
+| UFW firewall | SSH open; management & monitoring ports bound strictly to localhost |
 | Log rotation | PM2 logs: automated rotation, compression, and retention |
 
 → **Full documentation:** [init-README.md](init-README.md)
@@ -80,9 +78,9 @@ sudo ./init.sh
 
 ### `docker.sh`
 
-**Docker CE + monitoring integration — run after `init.sh`.**
+**Docker CE + Cockpit integration — run after `init.sh`.**
 
-Installs Docker CE and seamlessly connects Docker container management into Cockpit and container metrics into VictoriaMetrics.
+Installs Docker CE and seamlessly connects Docker container management into Cockpit Web Console.
 
 ```bash
 wget https://raw.githubusercontent.com/mojahid2021/Production-Server/main/docker.sh
@@ -98,8 +96,7 @@ sudo ./docker.sh
 | Docker Compose v2 | Integrated plugin |
 | BuildKit | Fast, cached image builds |
 | Cockpit Integration | View, start, stop, and inspect containers in Cockpit GUI |
-| cAdvisor | Per-container CPU / RAM / network / disk metrics on `:8080` |
-| VictoriaMetrics Scrape | Auto-scrapes Docker daemon (`:9323`) and cAdvisor (`:8080`) |
+| cAdvisor | Optional per-container CPU / RAM / network / disk metrics on `:8080` (`--with-cadvisor`) |
 | Ecosystem Tools | ctop, Lazydocker, and Docker Scout |
 
 → **Full documentation:** [Docker-README.md](Docker-README.md)
@@ -152,70 +149,48 @@ sudo ./nginx.sh
 4.  Add an Nginx virtual host + SSL
     sudo ./nginx.sh
 
-5.  Monitor everything in Cockpit & VictoriaMetrics
-    # Cockpit Host Management & Logs:
-    ssh -L 9090:localhost:9090 <user>@<server>
-    # open http://localhost:9090  (Login with deploy user / password)
-    #   System tab     → Real-time CPU, RAM, Disk I/O, Network
+5.  Monitor everything in Cockpit Web Console (0 MB Idle RAM)
+    # Forward Cockpit port over SSH:
+    ssh -L 9090:127.0.0.1:9090 <user>@<server>
+    # Open https://localhost:9090 in your browser (Login with deploy user / password):
+    #   Overview tab   → Real-time CPU, RAM, Disk I/O, Network
+    #   Node.js (PM2)  → Live PM2 app process monitor, Start/Stop/Restart, Logs modal
     #   Services tab   → Start/stop/restart PM2, Nginx, Docker units
     #   Logs tab       → Filter and search systemd-journald logs
-    #   Containers tab → Manage Docker containers
-
-    # VictoriaMetrics Time-Series Explorer (VMUI):
-    ssh -L 8428:localhost:8428 <user>@<server>
-    # open http://localhost:8428/vmui
-    #   Query metrics  → PromQL / MetricsQL for PM2, Docker, Node
+    #   Containers tab → Manage Docker containers (when docker.sh is installed)
 ```
 
 ---
 
 ## Monitoring & Management Stack
 
-All services are bound to `127.0.0.1` and accessed via SSH port forwarding. Nothing is exposed to the public internet.
+All management services are bound strictly to `127.0.0.1` and accessed via SSH port forwarding. Nothing is exposed to the public internet, and there is **zero background daemon overhead** when idle:
 
-| Service | Address | Purpose |
-|---------|---------|---------|
-| Cockpit | `127.0.0.1:9090` | Web Console — system management, journald logs, Docker (0 MB idle RAM) |
-| VictoriaMetrics | `127.0.0.1:8428` | Time-series TSDB & VMUI visual explorer (48 MB RAM cap) |
-| PM2 exporter | `127.0.0.1:9209` | PM2 process metrics (heap, CPU, event loop, restarts) |
-| Docker Daemon | `127.0.0.1:9323` | Native Docker engine metrics (via docker.sh, 0 extra containers) |
-| cAdvisor | `127.0.0.1:8080` | Optional per-container metrics (via `docker.sh --with-cadvisor`) |
+| Service | Address | Purpose | Idle RAM |
+|---------|---------|---------|:---:|
+| **Cockpit Web Console** | `127.0.0.1:9090` | Web Console — system management, journald logs | **0 MB** (socket-activated) |
+| **Node.js PM2 Extension** | Inside Cockpit | Real-time PM2 process monitor, start/stop/restart, live logs | **0 MB** (on-demand CLI bridge) |
+| **Containers GUI** | Inside Cockpit | Docker container lifecycle & stats (`cockpit-podman`) | **0 MB** (on-demand CLI bridge) |
+| **System Journald** | Local host | Capped binary logs (150MB disk / 30MB buffer) | **~0 MB** (native kernel service) |
 
 **Accessing Cockpit Web Console:**
 
 ```bash
-# Forward Cockpit port over SSH
-ssh -L 9090:localhost:9090 <user>@<server-ip>
+# Forward Cockpit port over SSH from your local computer
+ssh -L 9090:127.0.0.1:9090 <user>@<server-ip>
 
-# Then open in your browser
-http://localhost:9090
+# Then open in your browser:
+https://localhost:9090
 # Login using your deploy user credentials (or root)
 ```
 
-**Accessing VictoriaMetrics VMUI:**
+**Quick CLI Health & Tunnel Helpers:**
 
 ```bash
-# Forward VictoriaMetrics port over SSH
-ssh -L 8428:localhost:8428 <user>@<server-ip>
-
-# Then open in your browser
-http://localhost:8428/vmui
-```
-
-**Useful MetricsQL / PromQL Queries in VMUI:**
-
-```promql
-# PM2 App Memory Usage (Heap & RSS)
-pm2_process_memory_usage_bytes{instance="pm2_apps"}
-
-# PM2 App CPU Utilization
-pm2_process_cpu_usage_ratio{instance="pm2_apps"}
-
-# PM2 Process Restarts
-pm2_process_restart_count{instance="pm2_apps"}
-
-# Docker Container CPU Usage (via cAdvisor)
-container_cpu_usage_seconds_total
+server_status   # Instant CLI overview of CPU, RAM, disk, swap, and PM2 apps
+tunnel          # Displays SSH tunneling command for Cockpit
+pstatus         # PM2 status shortcut
+pmonit          # Terminal-based per-process CPU & RAM monitor
 ```
 
 ---

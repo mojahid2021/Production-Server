@@ -162,7 +162,7 @@ usage() {
         "    --no-nvm"   "Skip NVM + Node.js installation" \
         "    --no-pm2"   "Skip PM2 installation" \
         "    --no-fw"    "Skip UFW firewall configuration" \
-        "    --no-mon"   "Skip Cockpit + VictoriaMetrics monitoring installation" \
+        "    --no-mon"   "Skip Cockpit Web Console installation" \
         "-h  --help"     "Show this help and exit"
     echo ""
     echo -e "  ${BOLD}${WHT}Examples${R}"
@@ -498,7 +498,7 @@ prompt_inputs() {
     _conf_row "Swap Trigger" "Activates at ${SWAP_RAM_THRESHOLD}% RAM (swappiness=${SWAPPINESS})"
     _conf_row "UFW"          "$(  $GEN_FW      && echo "✔ configure" || echo "– skip (--no-fw)")"
     _conf_row "Firewall"     "SSH + $( [[ "$OPEN_NGINX_PORTS" == true ]] && echo "Nginx " ; [[ "$OPEN_EMAIL_PORTS" == true ]] && echo "Email " ; [[ -n "$CUSTOM_PORTS" ]] && echo "Custom " ; echo "")"
-    _conf_row "Monitoring"   "$( $SETUP_MON   && echo "✔ Cockpit · VictoriaMetrics · PM2 · Journald" || echo "– skip (--no-mon)")"
+    _conf_row "Monitoring"   "$( $SETUP_MON   && echo "✔ Cockpit · Node.js PM2 GUI · Journald (0 MB idle)" || echo "– skip (--no-mon)")"
     echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
@@ -1042,12 +1042,15 @@ jlogs_pm2() {
     journalctl -u "pm2-${USER}" -n "$limit" --no-pager 2>/dev/null || pm2 logs --lines "$limit"
 }
 
-vm_health() {
-    if curl -sf --max-time 3 "http://127.0.0.1:8428/health" &>/dev/null; then
-        echo "VictoriaMetrics is healthy (127.0.0.1:8428)"
-    else
-        echo "VictoriaMetrics is not responding"
-    fi
+cockpit_info() {
+    if [[ -f /etc/production-server.conf ]]; then source /etc/production-server.conf; fi
+    local u="${DEPLOY_USER:-$USER}"
+    echo ""
+    echo "=== Cockpit Web Console (Host & Node.js PM2) ==="
+    echo "Access from your local computer terminal:"
+    echo "    ssh -L 9090:127.0.0.1:9090 ${u}@<server-ip>"
+    echo "Then open in your browser: https://localhost:9090"
+    echo ""
 }
 
 # ── Log & Monitoring shortcuts ────────────────────────────────────
@@ -1055,7 +1058,8 @@ alias sys_logs='jlogs_system'                 # View system journal logs
 alias sys_errors='jlogs_errors'               # View system errors only
 alias nginx_logs='jlogs_nginx'                # View Nginx access & error logs
 alias pm2_jlogs='jlogs_pm2'                   # View PM2 systemd journal logs
-alias vm_status='vm_health'                   # Check VictoriaMetrics status
+alias cockpit_status='cockpit_info'           # Show Cockpit access info
+alias tunnel='mon_tunnel'                     # Show SSH tunnel command for Cockpit
 alias pstatus='pm2 status'
 alias prestart='pm2 restart all'
 alias pmonit='pm2 monit'
@@ -1175,33 +1179,23 @@ install_pm2() {
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  09 — MONITORING (Cockpit + VictoriaMetrics Ultra-Lean Hybrid Architecture)
+#  09 — MONITORING (Cockpit Web Console + Node.js PM2 GUI — 0 MB Idle RAM)
 #
-#  Five lean layers:
-#    A. Decommission Legacy & Redundant — purges Prometheus, Grafana, Loki, ClickHouse, node_exporter
+#  Pure Zero-Idle-RAM Architecture:
+#    A. Decommission Legacy & Redundant — purges Prometheus, Grafana, Loki, ClickHouse, node_exporter, VictoriaMetrics
 #    B. Compact journald          — caps disk storage to 150MB, RAM buffer to 30MB
 #    C. Cockpit Web Console       — web-based system management & logs (port 9090, 0 MB idle)
-#    D. VictoriaMetrics Single    — time-series TSDB & VMUI (port 8428, 48MB cap, 30s scrapes)
-#    E. PM2 auto-logging & exp   — process monitor & Prometheus exporter (port 9209, native logrotate)
-#    F. Health checks & CLI       — server_status CLI overview
+#    D. PM2 Admin Bridge & GUI    — native Cockpit extension for PM2 Node.js apps (0 MB idle)
+#    E. Health checks & CLI       — server_status CLI overview & mon_tunnel
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 setup_monitoring() {
     $SETUP_MON || { section "09" "Monitoring"; warn "Skipped (--no-mon)."; section_end; return; }
 
-    section "09" "Monitoring — Cockpit + VictoriaMetrics + PM2 (Ultra-Lean)"
-
-    # Detect system architecture once (used by VictoriaMetrics)
-    local arch
-    arch=$(dpkg --print-architecture 2>/dev/null || uname -m)
-    case "$arch" in
-        amd64|x86_64) arch="amd64" ;;
-        arm64|aarch64) arch="arm64" ;;
-        *) arch="amd64" ;;
-    esac
+    section "09" "Monitoring — Cockpit Web Console + Node.js PM2 GUI (0 MB Idle RAM)"
 
     # ── A. Decommission Legacy & Redundant Monitoring Services ────────────────
-    local legacy_services=("grafana-server" "prometheus" "loki" "promtail" "clickhouse-server" "node_exporter")
+    local legacy_services=("grafana-server" "prometheus" "loki" "promtail" "clickhouse-server" "node_exporter" "victoriametrics")
     local legacy_found=false
     for svc in "${legacy_services[@]}"; do
         if systemctl is-active --quiet "$svc" 2>/dev/null || systemctl is-enabled --quiet "$svc" 2>/dev/null; then
@@ -1211,11 +1205,12 @@ setup_monitoring() {
         fi
     done
     # Remove obsolete systemd units, binaries, and cron scripts
-    rm -f /etc/systemd/system/prometheus.service /etc/systemd/system/loki.service /etc/systemd/system/promtail.service /etc/systemd/system/node_exporter.service
-    rm -f /usr/local/bin/node_exporter
+    rm -f /etc/systemd/system/prometheus.service /etc/systemd/system/loki.service /etc/systemd/system/promtail.service /etc/systemd/system/node_exporter.service /etc/systemd/system/victoriametrics.service
+    rm -f /usr/local/bin/node_exporter /usr/local/bin/victoria-metrics /tmp/victoria-metrics.tar.gz
     rm -f /etc/cron.d/pm2-clickhouse /usr/local/bin/pm2-logs-to-clickhouse.sh
     # Reclaim disk space from legacy databases if present
-    rm -rf /var/lib/prometheus /var/lib/loki /etc/prometheus /etc/loki /etc/promtail /etc/grafana 2>/dev/null || true
+    rm -rf /var/lib/prometheus /var/lib/loki /etc/prometheus /etc/loki /etc/promtail /etc/grafana /var/lib/victoria-metrics /etc/victoriametrics 2>/dev/null || true
+    if id victoriametrics &>/dev/null; then userdel victoriametrics 2>/dev/null || true; fi
     if $legacy_found; then
         systemctl daemon-reload
         ok "Legacy & redundant services decommissioned (reclaimed ~1.6GB+ RAM)."
@@ -1270,99 +1265,614 @@ COCKPITSOCK
     systemctl enable --now cockpit.socket 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
     ok "Cockpit web console enabled on 127.0.0.1:9090 (0 MB idle RAM via socket activation)."
 
-    # ── D. VictoriaMetrics Single — Time-Series Metrics & VMUI ────────────────
-    local vm_ver="1.106.1"
-    info "Installing VictoriaMetrics Single v${vm_ver} (time-series database & VMUI)..."
-    if ! command -v victoria-metrics &>/dev/null; then
-        wget -q \
-            "https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v${vm_ver}/victoria-metrics-linux-${arch}-v${vm_ver}.tar.gz" \
-            -O /tmp/victoria-metrics.tar.gz 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-        if [[ -f /tmp/victoria-metrics.tar.gz ]]; then
-            tar xzf /tmp/victoria-metrics.tar.gz -C /tmp
-            mv /tmp/victoria-metrics-prod /usr/local/bin/victoria-metrics
-            chmod +x /usr/local/bin/victoria-metrics
-            rm -f /tmp/victoria-metrics.tar.gz
-            ok "VictoriaMetrics installed to /usr/local/bin/victoria-metrics."
-        else
-            warn "VictoriaMetrics download failed — install manually from https://victoriametrics.com/"
-        fi
-    else
-        ok "VictoriaMetrics already installed."
-    fi
+    # ── D. PM2 Bridge & Native Cockpit Extension (Node.js & PM2 GUI) ─────────
+    info "Installing Cockpit Node.js (PM2) GUI extension..."
 
-    # Create system user & directories for VictoriaMetrics
-    useradd --no-create-home --shell /bin/false victoriametrics 2>/dev/null || true
-    mkdir -p /var/lib/victoria-metrics /etc/victoriametrics
-    chown -R victoriametrics:victoriametrics /var/lib/victoria-metrics /etc/victoriametrics
+    # 1. System-wide CLI bridge between Cockpit and PM2
+    cat > /usr/local/bin/pm2-admin <<'PM2ADMIN'
+#!/usr/bin/env bash
+# /usr/local/bin/pm2-admin — System-wide bridge for Cockpit & CLI PM2 operations
+set -eo pipefail
 
-    # Write Prometheus-compatible scrape configuration (30s intervals cut scrape CPU/disk I/O by 67%)
-    cat > /etc/victoriametrics/scrape.yml <<'VMSCRAPE'
-global:
-  scrape_interval: 30s
-  evaluation_interval: 30s
+if [[ -f /etc/production-server.conf ]]; then
+    source /etc/production-server.conf
+fi
+DEPLOY_USER="${DEPLOY_USER:-$(id -un 1000 2>/dev/null || echo root)}"
 
-scrape_configs:
-  - job_name: 'pm2'
-    scrape_interval: 30s
-    scrape_timeout: 10s
-    static_configs:
-      - targets: ['127.0.0.1:9209']
-        labels:
-          instance: 'pm2_apps'
+run_pm2() {
+    su - "$DEPLOY_USER" -s /bin/bash -c "export NVM_DIR=\"\$HOME/.nvm\"; [ -s \"\$NVM_DIR/nvm.sh\" ] && source \"\$NVM_DIR/nvm.sh\"; pm2 $*"
+}
 
-  - job_name: 'docker'
-    scrape_interval: 30s
-    scrape_timeout: 10s
-    static_configs:
-      - targets: ['127.0.0.1:9323']
-VMSCRAPE
-    chown victoriametrics:victoriametrics /etc/victoriametrics/scrape.yml
+case "${1:-}" in
+    json|list-json)
+        run_pm2 jlist 2>/dev/null || echo "[]"
+        ;;
+    restart)
+        run_pm2 restart "${2:-all}"
+        ;;
+    stop)
+        run_pm2 stop "${2:-all}"
+        ;;
+    start)
+        run_pm2 start "${2:-all}"
+        ;;
+    save)
+        run_pm2 save
+        ;;
+    logs)
+        app="${2:-all}"
+        lines="${3:-100}"
+        run_pm2 logs "$app" --lines "$lines" --nostream
+        ;;
+    *)
+        run_pm2 "$@"
+        ;;
+esac
+PM2ADMIN
+    chmod 755 /usr/local/bin/pm2-admin
 
-    # Create systemd service unit for VictoriaMetrics (bounded cache to 48MB RAM)
-    cat > /etc/systemd/system/victoriametrics.service <<'VMSVC'
-[Unit]
-Description=VictoriaMetrics Time-Series Database
-After=network-online.target
-Wants=network-online.target
+    # 2. Register Cockpit package
+    mkdir -p /usr/share/cockpit/node-pm2
 
-[Service]
-Type=simple
-User=victoriametrics
-Group=victoriametrics
-ExecStart=/usr/local/bin/victoria-metrics \
-    -storageDataPath=/var/lib/victoria-metrics \
-    -retentionPeriod=15d \
-    -httpListenAddr=127.0.0.1:8428 \
-    -promscrape.config=/etc/victoriametrics/scrape.yml \
-    -memory.allowedBytes=48MB \
-    -loggerLevel=WARN
-Restart=always
-RestartSec=5
-LimitNOFILE=65536
+    cat > /usr/share/cockpit/node-pm2/manifest.json <<'COCKPITMANIFEST'
+{
+  "version": 0,
+  "tools": {
+    "node-pm2": {
+      "label": "Node.js (PM2)",
+      "path": "index.html",
+      "order": 15
+    }
+  }
+}
+COCKPITMANIFEST
 
-[Install]
-WantedBy=multi-user.target
-VMSVC
+    # 3. Cockpit Node.js PM2 HTML/JS Dashboard
+    cat > /usr/share/cockpit/node-pm2/index.html <<'COCKPITHMTL'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Node.js (PM2) - Cockpit</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script src="../base1/cockpit.js"></script>
+  <style>
+    :root {
+      --bg-color: #0f1216;
+      --card-bg: #1b1e24;
+      --card-border: #2c323b;
+      --text-main: #f0f3f6;
+      --text-muted: #8b949e;
+      --primary: #388bfd;
+      --primary-hover: #1f6feb;
+      --success: #238636;
+      --success-text: #3fb950;
+      --danger: #da3633;
+      --danger-text: #f85149;
+      --font-mono: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, monospace;
+    }
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 24px;
+    }
+    .header-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    .header-bar h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .header-bar .subtitle {
+      color: var(--text-muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .header-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+    .btn {
+      background: var(--card-bg);
+      color: var(--text-main);
+      border: 1px solid var(--card-border);
+      padding: 7px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .btn:hover {
+      background: #282e38;
+      border-color: #444c56;
+    }
+    .btn-primary {
+      background: var(--primary);
+      border-color: var(--primary-hover);
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: var(--primary-hover);
+    }
+    .btn-danger {
+      background: rgba(218, 54, 51, 0.15);
+      border-color: var(--danger);
+      color: var(--danger-text);
+    }
+    .btn-danger:hover {
+      background: var(--danger);
+      color: #fff;
+    }
+    .btn-sm {
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .stat-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .stat-title {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+    .stat-val {
+      font-size: 24px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .table-container {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 13px;
+    }
+    th {
+      background: rgba(255, 255, 255, 0.03);
+      padding: 12px 16px;
+      color: var(--text-muted);
+      font-weight: 600;
+      border-bottom: 1px solid var(--card-border);
+    }
+    td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--card-border);
+      vertical-align: middle;
+    }
+    tr:last-child td {
+      border-bottom: none;
+    }
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .badge-online {
+      background: rgba(35, 134, 54, 0.2);
+      color: var(--success-text);
+      border: 1px solid rgba(35, 134, 54, 0.4);
+    }
+    .badge-stopped {
+      background: rgba(139, 148, 158, 0.15);
+      color: var(--text-muted);
+      border: 1px solid rgba(139, 148, 158, 0.3);
+    }
+    .badge-errored {
+      background: rgba(218, 54, 51, 0.2);
+      color: var(--danger-text);
+      border: 1px solid rgba(218, 54, 51, 0.4);
+    }
+    .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+    .app-name {
+      font-weight: 600;
+      font-size: 14px;
+      color: #fff;
+    }
+    .app-id {
+      color: var(--text-muted);
+      font-size: 12px;
+      margin-left: 6px;
+    }
+    .log-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(2px);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .log-box {
+      background: #090b0e;
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      width: 100%;
+      max-width: 900px;
+      max-height: 85vh;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6);
+    }
+    .log-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 18px;
+      border-bottom: 1px solid var(--card-border);
+    }
+    .log-content {
+      padding: 16px;
+      overflow-y: auto;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.5;
+      color: #c9d1d9;
+      white-space: pre-wrap;
+      word-break: break-all;
+      flex: 1;
+    }
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1b1e24;
+      border: 1px solid var(--primary);
+      color: #fff;
+      padding: 10px 18px;
+      border-radius: 6px;
+      font-size: 13px;
+      display: none;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+      z-index: 2000;
+    }
+    .empty-state {
+      padding: 48px 20px;
+      text-align: center;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="header-bar">
+    <div>
+      <h1>⚡ Node.js Applications (PM2)</h1>
+      <div class="subtitle">Live status, resource metrics, service control & logs (0 MB Idle RAM)</div>
+    </div>
+    <div class="header-actions">
+      <label style="font-size:12px; color:var(--text-muted); display:inline-flex; align-items:center; gap:6px; cursor:pointer;">
+        <input type="checkbox" id="auto-refresh-toggle" checked> Auto-refresh (3s)
+      </label>
+      <button class="btn" onclick="savePm2List()">💾 Save State</button>
+      <button class="btn" onclick="restartAllApps()">🔄 Restart All</button>
+      <button class="btn btn-primary" onclick="loadPm2Data()">↻ Refresh</button>
+    </div>
+  </div>
 
-    systemctl daemon-reload
-    systemctl enable --now victoriametrics 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-    ok "VictoriaMetrics service enabled (127.0.0.1:8428, 48MB memory cap, 30s scrape interval)."
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-title">Active Applications</div>
+      <div class="stat-val" id="stat-apps">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">Total Node Memory</div>
+      <div class="stat-val" id="stat-memory">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">Total CPU Usage</div>
+      <div class="stat-val" id="stat-cpu">-</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-title">Total Restarts</div>
+      <div class="stat-val" id="stat-restarts">-</div>
+    </div>
+  </div>
 
-    # ── E. PM2 logging configuration & exporter ───────────────────────────────
+  <div class="table-container">
+    <table>
+      <thead>
+        <tr>
+          <th>App Name</th>
+          <th>Status</th>
+          <th>PID</th>
+          <th>Memory</th>
+          <th>CPU</th>
+          <th>Uptime</th>
+          <th>Restarts</th>
+          <th style="text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="apps-tbody">
+        <tr><td colspan="8" class="empty-state">Loading application status...</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Log Viewer Modal -->
+  <div class="log-modal" id="log-modal">
+    <div class="log-box">
+      <div class="log-header">
+        <strong id="log-title">Application Logs</strong>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-sm" onclick="fetchLogs(currentApp)">Refresh Logs</button>
+          <button class="btn btn-sm" onclick="closeLogModal()">Close</button>
+        </div>
+      </div>
+      <div class="log-content" id="log-body">Loading logs...</div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast-msg"></div>
+
+  <script>
+    let currentApp = null;
+    let refreshTimer = null;
+
+    function showToast(msg) {
+      const t = document.getElementById('toast-msg');
+      t.innerText = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, 3000);
+    }
+
+    function formatUptime(ms) {
+      if (!ms) return '0s';
+      const sec = Math.floor((Date.now() - ms) / 1000);
+      if (sec < 60) return sec + 's';
+      const min = Math.floor(sec / 60);
+      if (min < 60) return min + 'm';
+      const hrs = Math.floor(min / 60);
+      if (hrs < 24) return hrs + 'h ' + (min % 60) + 'm';
+      const days = Math.floor(hrs / 24);
+      return days + 'd ' + (hrs % 24) + 'h';
+    }
+
+    function loadPm2Data() {
+      if (typeof cockpit === 'undefined') return;
+
+      cockpit.spawn(["/usr/local/bin/pm2-admin", "json"])
+        .then(data => {
+          try {
+            const apps = JSON.parse(data || '[]');
+            renderApps(apps);
+          } catch(e) {
+            renderEmptyState("Unable to parse PM2 output: " + e.message);
+          }
+        })
+        .catch(err => {
+          renderEmptyState("Error querying PM2: " + (err.message || err));
+        });
+    }
+
+    function renderApps(apps) {
+      const tbody = document.getElementById('apps-tbody');
+      if (!apps || apps.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="8" class="empty-state">No Node.js apps currently running in PM2.<br><span style="font-size:12px; color:var(--text-muted)">Start an app on the server with: pm2 start app.js --name myapp</span></td></tr>';
+        document.getElementById('stat-apps').innerText = '0';
+        document.getElementById('stat-memory').innerText = '0 MB';
+        document.getElementById('stat-cpu').innerText = '0.0 %';
+        document.getElementById('stat-restarts').innerText = '0';
+        return;
+      }
+
+      let totalMem = 0;
+      let totalCpu = 0;
+      let onlineCount = 0;
+      let totalRestarts = 0;
+
+      let html = '';
+      apps.forEach(app => {
+        const status = app.pm2_env ? app.pm2_env.status : 'stopped';
+        const memBytes = (app.monit && app.monit.memory) || 0;
+        const memMb = (memBytes / 1024 / 1024).toFixed(1);
+        const cpu = (app.monit && app.monit.cpu) || 0;
+        const restarts = (app.pm2_env && app.pm2_env.restart_time) || 0;
+        const uptime = (app.pm2_env && app.pm2_env.pm_uptime) ? formatUptime(app.pm2_env.pm_uptime) : '-';
+
+        totalMem += parseFloat(memMb);
+        totalCpu += parseFloat(cpu);
+        totalRestarts += restarts;
+        if (status === 'online') onlineCount++;
+
+        let badgeClass = 'badge-stopped';
+        if (status === 'online') badgeClass = 'badge-online';
+        if (status === 'errored') badgeClass = 'badge-errored';
+
+        html += `
+          <tr>
+            <td>
+              <span class="app-name">${app.name}</span>
+              <span class="app-id">#${app.pm_id}</span>
+            </td>
+            <td><span class="badge ${badgeClass}"><span class="dot"></span>${status}</span></td>
+            <td style="font-family:var(--font-mono)">${app.pid || '-'}</td>
+            <td><strong>${memMb}</strong> MB</td>
+            <td>${cpu} %</td>
+            <td>${uptime}</td>
+            <td style="${restarts > 5 ? 'color:var(--danger-text); font-weight:bold;' : ''}">${restarts}</td>
+            <td style="text-align:right;">
+              <button class="btn btn-sm" onclick="appAction('restart', '${app.name}')" title="Restart App">🔄</button>
+              ${status === 'online'
+                ? `<button class="btn btn-sm btn-danger" onclick="appAction('stop', '${app.name}')" title="Stop App">⏹</button>`
+                : `<button class="btn btn-sm btn-primary" onclick="appAction('start', '${app.name}')" title="Start App">▶</button>`
+              }
+              <button class="btn btn-sm" onclick="openLogModal('${app.name}')" title="View Logs">📋 Logs</button>
+            </td>
+          </tr>
+        `;
+      });
+
+      tbody.innerHTML = html;
+      document.getElementById('stat-apps').innerText = `${onlineCount} / ${apps.length} Online`;
+      document.getElementById('stat-memory').innerText = totalMem.toFixed(1) + ' MB';
+      document.getElementById('stat-cpu').innerText = totalCpu.toFixed(1) + ' %';
+      document.getElementById('stat-restarts').innerText = totalRestarts;
+    }
+
+    function renderEmptyState(msg) {
+      document.getElementById('apps-tbody').innerHTML = `<tr><td colspan="8" class="empty-state">${msg}</td></tr>`;
+    }
+
+    function appAction(action, appName) {
+      showToast(`${action.toUpperCase()} ${appName}...`);
+      if (typeof cockpit !== 'undefined') {
+        cockpit.spawn(["/usr/local/bin/pm2-admin", action, appName])
+          .then(() => {
+            showToast(`${appName} ${action}ed successfully.`);
+            setTimeout(loadPm2Data, 800);
+          })
+          .catch(err => {
+            showToast(`Failed to ${action} ${appName}: ` + (err.message || err));
+          });
+      }
+    }
+
+    function restartAllApps() {
+      if (!confirm("Are you sure you want to restart ALL Node.js PM2 apps?")) return;
+      showToast("Restarting all apps...");
+      if (typeof cockpit !== 'undefined') {
+        cockpit.spawn(["/usr/local/bin/pm2-admin", "restart", "all"])
+          .then(() => {
+            showToast("All apps restarted.");
+            setTimeout(loadPm2Data, 1000);
+          })
+          .catch(err => showToast("Error: " + err));
+      }
+    }
+
+    function savePm2List() {
+      showToast("Saving PM2 process list...");
+      if (typeof cockpit !== 'undefined') {
+        cockpit.spawn(["/usr/local/bin/pm2-admin", "save"])
+          .then(() => showToast("PM2 state saved successfully (persists on reboot)."))
+          .catch(err => showToast("Error saving PM2 state: " + err));
+      }
+    }
+
+    function openLogModal(appName) {
+      currentApp = appName;
+      document.getElementById('log-title').innerText = `Logs for: ${appName} (last 100 lines)`;
+      document.getElementById('log-body').innerText = "Fetching logs...";
+      document.getElementById('log-modal').style.display = 'flex';
+      fetchLogs(appName);
+    }
+
+    function fetchLogs(appName) {
+      if (typeof cockpit !== 'undefined') {
+        cockpit.spawn(["/usr/local/bin/pm2-admin", "logs", appName, "100"])
+          .then(out => {
+            document.getElementById('log-body').innerText = out || 'No logs recorded yet.';
+            const b = document.getElementById('log-body');
+            b.scrollTop = b.scrollHeight;
+          })
+          .catch(err => {
+            document.getElementById('log-body').innerText = "Error loading logs: " + (err.message || err);
+          });
+      }
+    }
+
+    function closeLogModal() {
+      document.getElementById('log-modal').style.display = 'none';
+      currentApp = null;
+    }
+
+    document.getElementById('auto-refresh-toggle').addEventListener('change', (e) => {
+      if (e.target.checked) {
+        refreshTimer = setInterval(loadPm2Data, 3000);
+      } else {
+        clearInterval(refreshTimer);
+      }
+    });
+
+    loadPm2Data();
+    refreshTimer = setInterval(loadPm2Data, 3000);
+  </script>
+</body>
+</html>
+COCKPITHMTL
+
+    ok "Cockpit 'Node.js (PM2)' extension package installed (/usr/share/cockpit/node-pm2)."
+
+    # 4. SSH Tunnel Helper Script
+    cat > /usr/local/bin/mon_tunnel <<'MONTUNNEL'
+#!/usr/bin/env bash
+if [[ -f /etc/production-server.conf ]]; then source /etc/production-server.conf; fi
+u="${DEPLOY_USER:-$(id -un)}"
+echo ""
+echo "=== Access Cockpit Web Console from your Computer ==="
+echo "Run this command in a terminal on your personal computer/laptop:"
+echo ""
+echo "    ssh -L 9090:127.0.0.1:9090 ${u}@<server-ip>"
+echo ""
+echo "Then open your browser to: https://localhost:9090"
+echo "Login with username '${u}' (or root) and your password."
+echo ""
+MONTUNNEL
+    chmod 755 /usr/local/bin/mon_tunnel
+    ok "SSH tunnel helper installed → /usr/local/bin/mon_tunnel (or alias 'tunnel')"
+
+    # ── E. PM2 auto-logging & system logrotate ────────────────────────────────
     if $INSTALL_PM2; then
-        # 1. Clean up pm2-logrotate Node daemon if previously installed (saves ~30MB RAM)
+        # 1. Clean up pm2-logrotate and pm2-prometheus-exporter (saves ~55MB RAM)
         su - "$USERNAME" -c "
             export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"
             pm2 uninstall pm2-logrotate 2>/dev/null || true
+            pm2 uninstall pm2-prometheus-exporter 2>/dev/null || true
+            pm2 save 2>/dev/null || true
         " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
 
-        # 2. Create global PM2 default config file for auto-logging
+        # 2. Global PM2 default config file for auto-logging
         local pm2_home="/home/${USERNAME}/.pm2"
         mkdir -p "$pm2_home"
         
         cat > "$pm2_home/conf.js" <<'PM2CONF'
 // PM2 Global Configuration
-// Automatically applied to ALL pm2 start commands
 module.exports = {
   apps: [],
   default_options: {
@@ -1380,14 +1890,10 @@ module.exports = {
 };
 PM2CONF
         chown "$USERNAME:$USERNAME" "$pm2_home/conf.js"
-        ok "PM2 global config created (auto-applies to all apps)."
+        ok "PM2 global config created."
 
         # 3. Create auto-logging wrapper helper script
-        local pm2_bin
-        pm2_bin=$(su - "$USERNAME" -c 'export NVM_DIR="$HOME/.nvm"; source "$NVM_DIR/nvm.sh"; which pm2' 2>/dev/null || echo "")
-        
-        if [[ -n "$pm2_bin" ]]; then
-            cat > "$pm2_home/pm2-start-logs.sh" <<'PM2STARTSCRIPT'
+        cat > "$pm2_home/pm2-start-logs.sh" <<'PM2STARTSCRIPT'
 #!/bin/bash
 # pm2-start-logs.sh — PM2 app start with AUTOMATIC detailed logging
 set -euo pipefail
@@ -1442,10 +1948,9 @@ echo "✓ App started: $app_name"
 echo "  Output logs: $logs_dir/${app_name}-out.log"
 echo "  Error logs:  $logs_dir/${app_name}-error.log"
 PM2STARTSCRIPT
-            chmod +x "$pm2_home/pm2-start-logs.sh"
-            chown "$USERNAME:$USERNAME" "$pm2_home/pm2-start-logs.sh"
-            ok "PM2 auto-logging wrapper script created."
-        fi
+        chmod +x "$pm2_home/pm2-start-logs.sh"
+        chown "$USERNAME:$USERNAME" "$pm2_home/pm2-start-logs.sh"
+        ok "PM2 auto-logging wrapper script created."
 
         # 4. Create enhanced ecosystem.config.js template
         cat > "$pm2_home/ecosystem.template.js" <<'ECOSYSTEMTEMPLATE'
@@ -1472,48 +1977,15 @@ module.exports = {
 ECOSYSTEMTEMPLATE
         chown "$USERNAME:$USERNAME" "$pm2_home/ecosystem.template.js"
         ok "PM2 ecosystem.config.js template created → ~/.pm2/ecosystem.template.js"
-
-        # 5. Install pm2-prometheus-exporter so PM2 process states appear in VictoriaMetrics
-        su - "$USERNAME" -c "
-            export NVM_DIR=\"\$HOME/.nvm\"; source \"\$NVM_DIR/nvm.sh\"
-            pm2 install pm2-prometheus-exporter 2>/dev/null || true
-            pm2 set pm2-prometheus-exporter:port 9209 2>/dev/null || true
-            pm2 save 2>/dev/null || true
-        " 2>&1 | while IFS= read -r l; do echo -e "  ${GRY}│  $l${R}"; done || true
-        ok "PM2 Prometheus exporter installed — exposes metrics on 127.0.0.1:9209."
-        info "Scraped by VictoriaMetrics. Metrics viewable at http://localhost:8428/vmui."
     fi
 
-    # ── F. Health Check — Verify monitoring components are responding ─────────
+    # ── F. Health Check — Verify Cockpit socket is active ─────────────────────
     info "Performing monitoring stack health checks..."
-    local checks_passed=0
-    local checks_total=3
-    
-    # Check VictoriaMetrics
-    if curl -sf --max-time 3 "http://127.0.0.1:8428/health" &>/dev/null; then
-        ok "✓ VictoriaMetrics responding (127.0.0.1:8428, VMUI active)"
-        (( checks_passed++ ))
-    else
-        warn "✗ VictoriaMetrics not responding — restart with: systemctl restart victoriametrics"
-    fi
-    
-    # Check Cockpit socket
     if systemctl is-active --quiet cockpit.socket 2>/dev/null; then
         ok "✓ Cockpit socket active (127.0.0.1:9090, 0 MB idle memory)"
-        (( checks_passed++ ))
     else
         warn "✗ Cockpit socket inactive — start with: systemctl start cockpit.socket"
     fi
-    
-    # Check PM2 exporter
-    if curl -sf --max-time 3 "http://127.0.0.1:9209/metrics" &>/dev/null; then
-        ok "✓ PM2 exporter responding (127.0.0.1:9209)"
-        (( checks_passed++ ))
-    else
-        warn "⚠ PM2 exporter not responding yet (needs app running) — expected for fresh installs"
-    fi
-    
-    ok "Monitoring health checks: $checks_passed/$checks_total passed"
 
     # ── G. server_status — quick CLI overview script ──────────────────────────
     local deploy_user="$USERNAME"
@@ -1601,26 +2073,11 @@ fi
 echo ""
 echo -e "  \${BOLD}\${WHT}Host Management & Monitoring Stack\${R}"
 if systemctl is-active --quiet cockpit.socket 2>/dev/null; then
-    echo -e "  \${GRN}✔\${R}  Cockpit Web Console active (Host Management & Logs → 127.0.0.1:9090)"
-    echo -e "  \${GRY}     SSH Tunnel: ssh -L 9090:localhost:9090 ${deploy_user}@<server-ip>\${R}"
-    echo -e "  \${GRY}     Web URL:    http://localhost:9090 (login as ${deploy_user})\${R}"
+    echo -e "  \${GRN}✔\${R}  Cockpit Web Console active (Host, Logs & PM2 GUI → 127.0.0.1:9090)"
+    echo -e "  \${GRY}     SSH Tunnel: ssh -L 9090:127.0.0.1:9090 ${deploy_user}@<server-ip>\${R}"
+    echo -e "  \${GRY}     Web URL:    https://localhost:9090 (0 MB idle RAM)\${R}"
 else
-    echo -e "  \${GRY}  Cockpit socket not active (sudo systemctl start cockpit.socket)\${R}"
-fi
-
-if systemctl is-active --quiet victoriametrics 2>/dev/null; then
-    echo -e "  \${GRN}✔\${R}  VictoriaMetrics active (Time-Series TSDB & VMUI → 127.0.0.1:8428)"
-    echo -e "  \${GRY}     SSH Tunnel: ssh -L 8428:localhost:8428 ${deploy_user}@<server-ip>\${R}"
-    echo -e "  \${GRY}     VMUI URL:   http://localhost:8428/vmui\${R}"
-else
-    echo -e "  \${GRY}  VictoriaMetrics not running (sudo systemctl start victoriametrics)\${R}"
-fi
-
-
-if curl -sf --max-time 3 "http://127.0.0.1:9209/metrics" 2>/dev/null | grep -q "pm2_up"; then
-    echo -e "  \${GRN}✔\${R}  PM2 exporter running (127.0.0.1:9209)"
-else
-    echo -e "  \${YLW}⚠\${R}  PM2 exporter not responding — run: su - ${deploy_user} -c 'pm2 install pm2-prometheus-exporter'"
+    echo -e "  \${GRY}  Cockpit socket not active (sudo systemctl enable --now cockpit.socket)\${R}"
 fi
 
 # ── Docker ────────────────────────────────────────────────────────────────────
@@ -1645,7 +2102,7 @@ fi
 
 echo ""
 echo -e "  \${GRY}\${HR}\${R}"
-echo -e "  \${GRY}Host & Logs: http://localhost:9090 (Cockpit) │ App Metrics: http://localhost:8428/vmui\${R}"
+echo -e "  \${GRY}Web Console (Host, Logs & PM2): http://localhost:9090 (Cockpit via SSH tunnel)\${R}"
 echo ""
 STATUSSCRIPT
 
@@ -1907,10 +2364,8 @@ DEPLOY_USER="${USERNAME}"
 DEPLOY_HOME="/home/${USERNAME}"
 NODE_VERSION="${NODE_VER}"
 PROVISION_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-MONITORING="cockpit+victoriametrics"
+MONITORING="cockpit"
 COCKPIT_PORT="9090"
-VICTORIAMETRICS_PORT="8428"
-PM2_EXPORTER_PORT="9209"
 DOCKER_METRICS_PORT="9323"
 SWAP_SIZE="${SWAP_SIZE:-auto}"
 SWAP_RAM_THRESHOLD="${SWAP_RAM_THRESHOLD:-90}"
@@ -1947,7 +2402,7 @@ print_summary() {
     _row "Swap Cushion"   "${SWAP_SIZE:-2G} (at ${SWAP_RAM_THRESHOLD:-90}% RAM, swappiness=${SWAPPINESS:-10})"
     _row "SSH Access"     "password + SSH key  (both supported)"
     _row "Root Access"    "ssh ${USERNAME}@<server>  →  sudo -i  (direct root SSH blocked)"
-    _row "Monitoring"     "Cockpit :9090 [Host & Logs] · VictoriaMetrics :8428 [App Metrics]"
+    _row "Monitoring"     "Cockpit Web Console :9090 [Host, Logs & PM2 Apps] (0 MB Idle RAM)"
 
     _sep
     printf "  ${PRP}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
@@ -1977,6 +2432,7 @@ print_summary() {
     _sep
     local mon_steps=(
         "server_status                 quick overview of system & services"
+        "tunnel                        show SSH tunnel command for Cockpit Web GUI"
         "sys_logs                      view recent system journal logs"
         "sys_errors                    view critical system error logs"
         "nginx_logs                    view web server access and errors"
@@ -1985,56 +2441,31 @@ print_summary() {
         "pm2 logs                      tail live logs of all PM2 apps"
         "plog_app <app-name>           view last 100 lines for one app"
         "plog_errors                   view recent errors from all apps"
-        "vm_status                     check VictoriaMetrics health endpoint"
     )
     for s in "${mon_steps[@]}"; do
-        printf "  ${PRP}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}
-" "$s"
+        printf "  ${PRP}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
     done
 
     _sep
-    _hdr "🖥️  COCKPIT WEB CONSOLE (Host Management & Logs)"
+    _hdr "🖥️  COCKPIT WEB CONSOLE (Host, Logs & Node.js PM2 GUI)"
     _sep
     local cockpit_info=(
         "🔗 Access via SSH Tunnel (Socket Active on 127.0.0.1:9090):"
-        "   ssh -L 9090:localhost:9090 ${USERNAME}@<server-ip>"
-        "   Open in Browser: http://localhost:9090"
+        "   ssh -L 9090:127.0.0.1:9090 ${USERNAME}@<server-ip>"
+        "   Open in Browser: https://localhost:9090"
         "   Login with: ${USERNAME} (or root) and your password"
         ""
         "Features Included:"
+        " • Node.js (PM2) GUI: live app list, RAM/CPU, start/stop/restart & logs"
         " • Real-time hardware utilization (CPU, RAM, Disk I/O, Network)"
         " • systemd service control (start/stop/restart PM2, Nginx, Docker)"
         " • Journald log search, filtering by priority, unit, and keyword"
         " • Web terminal with full root/sudo escalation"
-        " • System user accounts and software package updates"
-        " • Zero RAM overhead when idle (systemd socket activation)"
+        " • Pure Zero-Idle-RAM: sleeps completely until opened in your browser"
     )
     for s in "${cockpit_info[@]}"; do
-        [[ -z "$s" ]] && { printf "  ${PRP}${BOLD}║${R}
-"; continue; }
-        printf "  ${PRP}${BOLD}║${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}
-" "$s"
-    done
-
-    _sep
-    _hdr "📊  VICTORIAMETRICS & VMUI (Application Time-Series Metrics)"
-    _sep
-    local vm_info=(
-        "🔗 Access via SSH Tunnel (Listening on 127.0.0.1:8428):"
-        "   ssh -L 8428:localhost:8428 ${USERNAME}@<server-ip>"
-        "   Open in Browser: http://localhost:8428/vmui"
-        ""
-        "Features Included:"
-        " • PM2 metrics: Heap memory, CPU %, event loop latency, restarts"
-        " • Native Prometheus PromQL & MetricsQL visual explorer"
-        " • 15-day historical time-series storage with Gorilla compression"
-        " • Ultra-low memory footprint (~50MB RAM vs 600MB+ Prometheus/Grafana)"
-    )
-    for s in "${vm_info[@]}"; do
-        [[ -z "$s" ]] && { printf "  ${PRP}${BOLD}║${R}
-"; continue; }
-        printf "  ${PRP}${BOLD}║${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}
-" "$s"
+        [[ -z "$s" ]] && { printf "  ${PRP}${BOLD}║${R}\n"; continue; }
+        printf "  ${PRP}${BOLD}║${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
     done
 
     _sep
