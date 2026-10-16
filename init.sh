@@ -184,6 +184,7 @@ parse_args() {
     INSTALL_NVM=true INSTALL_PM2=true
     GEN_FW=true SETUP_MON=true
     SWAP_SIZE="" SWAP_RAM_THRESHOLD="" SWAPPINESS=""
+    IS_EXISTING_USER=false PASSWORD=""
 
     # Parse any flags that were passed
     while [[ $# -gt 0 ]]; do
@@ -203,6 +204,10 @@ parse_args() {
             *)                die "Unknown option: '$1'. Use -h for help." ;;
         esac
     done
+
+    if [[ -n "$USERNAME" ]] && id "$USERNAME" &>/dev/null; then
+        IS_EXISTING_USER=true
+    fi
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -282,9 +287,11 @@ prompt_inputs() {
                 continue
             fi
             if id "$USERNAME" &>/dev/null; then
-                _warn "User '${USERNAME}' already exists on this system. Choose a different name."
-                USERNAME=""
-                continue
+                _hint "User '${USERNAME}' already exists on this system."
+                _hint "Existing account will be updated and reconfigured (home directory preserved)."
+                _ok "Existing user recognized:  ${WHT}${BOLD}${USERNAME}${R}"
+                IS_EXISTING_USER=true
+                break
             fi
             _ok "Username set:  ${WHT}${BOLD}${USERNAME}${R}"
             break
@@ -301,19 +308,36 @@ prompt_inputs() {
     # ══════════════════════════════════════════════════════════════════════════
     if [[ -z "$CUSTOM_PASS" ]]; then
         _step 2 5 "Deploy User Password"
-        _hint "Type a custom password, or press Enter to auto-generate a secure one."
-        _hint "Minimum 8 characters if you choose your own.  Input is hidden."
-        echo -e "  ${PRP}${BOLD}│${R}"
-        _prompt && get_input -s && CUSTOM_PASS="$REPLY"
-        echo ""   # newline after hidden input
-
-        if [[ -z "$CUSTOM_PASS" ]]; then
-            _ok "Password will be auto-generated  ${GRY}(${PASS_LEN} chars, mixed case + symbols)${R}"
-        elif [[ ${#CUSTOM_PASS} -lt 8 ]]; then
-            _warn "Password too short (min 8 chars) — will auto-generate a secure one instead."
-            CUSTOM_PASS=""
+        if $IS_EXISTING_USER; then
+            _hint "User '${USERNAME}' already exists. Press Enter to KEEP current password,"
+            _hint "or type a new custom password (min 8 chars) to change it:"
+            echo -e "  ${PRP}${BOLD}│${R}"
+            _prompt && get_input -s && CUSTOM_PASS="$REPLY"
+            echo ""
+            if [[ -z "$CUSTOM_PASS" ]]; then
+                CUSTOM_PASS="__KEEP__"
+                _ok "Current user password will be preserved."
+            elif [[ ${#CUSTOM_PASS} -lt 8 ]]; then
+                _warn "Password too short (min 8 chars) — preserving current password."
+                CUSTOM_PASS="__KEEP__"
+            else
+                _ok "New custom password accepted  ${GRY}(length: ${#CUSTOM_PASS} chars)${R}"
+            fi
         else
-            _ok "Custom password accepted  ${GRY}(length: ${#CUSTOM_PASS} chars — not shown again)${R}"
+            _hint "Type a custom password, or press Enter to auto-generate a secure one."
+            _hint "Minimum 8 characters if you choose your own.  Input is hidden."
+            echo -e "  ${PRP}${BOLD}│${R}"
+            _prompt && get_input -s && CUSTOM_PASS="$REPLY"
+            echo ""   # newline after hidden input
+
+            if [[ -z "$CUSTOM_PASS" ]]; then
+                _ok "Password will be auto-generated  ${GRY}(${PASS_LEN} chars, mixed case + symbols)${R}"
+            elif [[ ${#CUSTOM_PASS} -lt 8 ]]; then
+                _warn "Password too short (min 8 chars) — will auto-generate a secure one instead."
+                CUSTOM_PASS=""
+            else
+                _ok "Custom password accepted  ${GRY}(length: ${#CUSTOM_PASS} chars — not shown again)${R}"
+            fi
         fi
         _step_end
     else
@@ -489,8 +513,12 @@ prompt_inputs() {
     _conf_row() {
         printf "  ${PRP}${BOLD}║${R}  ${GRY}%-18s${R}  ${WHT}${BOLD}%-52s${R}  ${PRP}${BOLD}║${R}\n" "$1" "$2"
     }
-    _conf_row "Username"     "$USERNAME"
-    _conf_row "Password"     "$([ -n "$CUSTOM_PASS" ] && echo "custom (hidden)" || echo "will be auto-generated")"
+    _conf_row "Username"     "${USERNAME}$( $IS_EXISTING_USER && echo " (existing — update)" || echo "" )"
+    if [[ "$CUSTOM_PASS" == "__KEEP__" ]]; then
+        _conf_row "Password"     "keep existing"
+    else
+        _conf_row "Password"     "$([ -n "$CUSTOM_PASS" ] && echo "custom (hidden)" || echo "will be auto-generated")"
+    fi
     _conf_row "Node.js"      "v${NODE_VER}  (via NVM ${NVM_VERSION})"
     _conf_row "NVM"          "$(  $INSTALL_NVM && echo "✔ install" || echo "– skip (--no-nvm)")"
     _conf_row "PM2"          "$(  $INSTALL_PM2 && echo "✔ install" || echo "– skip (--no-pm2)")"
@@ -765,27 +793,44 @@ check_dependencies() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 create_user() {
-    section "02" "Creating OS User"
+    section "02" "Configuring OS User"
 
-    if [[ -n "$CUSTOM_PASS" ]]; then
-        PASSWORD="$CUSTOM_PASS"
-        ok "Using custom password."
+    if id "$USERNAME" &>/dev/null; then
+        ok "User '$USERNAME' already exists — preserving account and existing files."
+        if [[ -n "$CUSTOM_PASS" && "$CUSTOM_PASS" != "__KEEP__" ]]; then
+            PASSWORD="$CUSTOM_PASS"
+            local hashed
+            hashed=$(openssl passwd -6 "$PASSWORD") || die "Failed to hash password (openssl error)."
+            usermod -p "$hashed" "$USERNAME"
+            ok "Password updated for '$USERNAME'."
+        else
+            ok "Existing password for '$USERNAME' retained."
+        fi
+        usermod -s /bin/bash "$USERNAME" 2>/dev/null || true
+        mkdir -p "/home/$USERNAME"
+        chown "$USERNAME:$USERNAME" "/home/$USERNAME"
+        chmod 755 "/home/$USERNAME"
     else
-        PASSWORD=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9!@#_+-' | head -c "$PASS_LEN")
-        ok "Password auto-generated (${PASS_LEN} chars)."
+        if [[ -n "$CUSTOM_PASS" && "$CUSTOM_PASS" != "__KEEP__" ]]; then
+            PASSWORD="$CUSTOM_PASS"
+            ok "Using custom password."
+        else
+            PASSWORD=$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9!@#_+-' | head -c "$PASS_LEN")
+            ok "Password auto-generated (${PASS_LEN} chars)."
+        fi
+
+        getent group "$USERNAME" &>/dev/null || run "groupadd '$USERNAME'"
+
+        local cmd="useradd --gid '$USERNAME' --shell /bin/bash --comment 'Deploy $USERNAME' --create-home --home-dir '/home/$USERNAME' '$USERNAME'"
+        run "$cmd"
+        ok "User '$USERNAME' created → /home/$USERNAME"
+
+        local hashed
+        hashed=$(openssl passwd -6 "$PASSWORD") || die "Failed to hash password (openssl error)."
+        [[ -n "$hashed" ]] || die "Password hash is empty — check openssl installation."
+        usermod -p "$hashed" "$USERNAME"
+        ok "Password set."
     fi
-
-    getent group "$USERNAME" &>/dev/null || run "groupadd '$USERNAME'"
-
-    local cmd="useradd --gid '$USERNAME' --shell /bin/bash --comment 'Deploy $USERNAME' --create-home --home-dir '/home/$USERNAME' '$USERNAME'"
-    run "$cmd"
-    ok "User '$USERNAME' created → /home/$USERNAME"
-
-    local hashed
-    hashed=$(openssl passwd -6 "$PASSWORD") || die "Failed to hash password (openssl error)."
-    [[ -n "$hashed" ]] || die "Password hash is empty — check openssl installation."
-    usermod -p "$hashed" "$USERNAME"
-    ok "Password set."
 
     section_end
 }
@@ -2432,10 +2477,14 @@ print_summary() {
     _row "Monitoring"     "Cockpit Web Console :9090 [Host, Logs & PM2 Apps] (0 MB Idle RAM)"
 
     _sep
-    printf "  ${PRP}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
-        "⚠  Password" "$PASSWORD"
-    printf "  ${PRP}${BOLD}║${R}  ${GRY}%-22s${R}  ${GRY}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
-        "" "Save this now — it will NOT be shown again."
+    if [[ -n "$PASSWORD" && "$PASSWORD" != "__KEEP__" ]]; then
+        printf "  ${PRP}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
+            "⚠  Password" "$PASSWORD"
+        printf "  ${PRP}${BOLD}║${R}  ${GRY}%-22s${R}  ${GRY}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
+            "" "Save this now — it will NOT be shown again."
+    else
+        _row "Password" "(existing password retained)"
+    fi
 
     _sep
     _hdr "🚀  Deploy Your First Node.js App  (repeat per project)"
