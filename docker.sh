@@ -62,6 +62,25 @@ PROM_EXISTS=false
 GRAFANA_EXISTS=false
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  COLORS
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+if [[ -t 1 ]] && tput colors &>/dev/null && (( $(tput colors) >= 8 )); then
+    R=$'\033[0m'  BOLD=$'\033[1m'  DIM=$'\033[2m'  ITAL=$'\033[3m'
+    GRN=$'\033[38;5;82m'   BLU=$'\033[38;5;33m'   CYN=$'\033[38;5;45m'
+    YLW=$'\033[38;5;220m'  ORG=$'\033[38;5;208m'  PRP=$'\033[38;5;135m'
+    WHT=$'\033[38;5;255m'  GRY=$'\033[38;5;244m'  RED=$'\033[38;5;196m'
+    TICK="${GRN}✔${R}"  CROSS="${RED}✘${R}"  WARN_IC="${YLW}⚠${R}"
+    ARROW="${CYN}›${R}"  BULLET="${PRP}◆${R}"
+else
+    R='' BOLD='' DIM='' ITAL='' GRN='' BLU='' CYN='' YLW='' ORG='' PRP='' WHT='' GRY='' RED=''
+    TICK='[OK]' CROSS='[ERR]' WARN_IC='[WARN]' ARROW='->' BULLET='*'
+fi
+
+readonly HR2="════════════════════════════════════════════════════════════════════════════"
+readonly HR="────────────────────────────────────────────────────────────────────────────"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  OUTPUT (identical to init.sh)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -130,13 +149,13 @@ parse_args() {
 }
 
 usage() {
-    clear
+    clear 2>/dev/null || true
     echo ""
     echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  🐳  docker.sh  —  Docker CE + Monitoring Integration  v${SCRIPT_VERSION}"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Companion to init.sh  ·  Ubuntu 20.04 / 22.04 / 24.04 LTS"
+    printf  "  ${BLU}${BOLD}║${R}  ${WHT}${BOLD}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "docker.sh  --  Docker CE + Cockpit Web Console  v${SCRIPT_VERSION}"
+    printf  "  ${BLU}${BOLD}║${R}  ${GRY}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "Companion to init.sh  |  Ubuntu 20.04 / 22.04 / 24.04 LTS"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
     echo -e "  ${BOLD}${WHT}Usage${R}"
@@ -155,18 +174,18 @@ usage() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 show_banner() {
-    clear
+    clear 2>/dev/null || true
     echo ""
     echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  🐳  docker.sh  —  Docker CE + Full Monitoring Integration  v${SCRIPT_VERSION}"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Docker · Compose v2 · BuildKit · cAdvisor · Cockpit Web Console"
+    printf  "  ${BLU}${BOLD}║${R}  ${WHT}${BOLD}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "docker.sh  --  Docker CE + Full Monitoring Integration  v${SCRIPT_VERSION}"
+    printf  "  ${BLU}${BOLD}║${R}  ${GRY}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "Docker | Compose v2 | BuildKit | cAdvisor | Cockpit Web Console"
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Companion to init.sh — integrates with Cockpit Web Console"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Cockpit Web Console running from init.sh (0 MB idle RAM)"
+    printf  "  ${BLU}${BOLD}║${R}  ${GRY}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "Companion to init.sh -- integrates with Cockpit Web Console"
+    printf  "  ${BLU}${BOLD}║${R}  ${GRY}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "Cockpit Web Console running from init.sh (0 MB idle RAM)"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 }
@@ -858,13 +877,13 @@ verify_all() {
 print_summary() {
     echo ""
     echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${GRN}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  ✔  docker.sh Complete — Docker CE + Cockpit Web Console Ready"
+    printf  "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "✔  docker.sh Complete -- Docker CE + Cockpit Web Console Ready"
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
 
-    _row() { printf "  ${BLU}${BOLD}║${R}  ${GRY}%-22s${R}  ${WHT}${BOLD}%-50s${R}  ${BLU}${BOLD}║${R}\n" "$1" "$2"; }
+    _row() { printf "  ${BLU}${BOLD}║${R}  ${GRY}%-18s${R}  ${WHT}${BOLD}%-52s${R}  ${BLU}${BOLD}║${R}\n" "$1" "$2"; }
     _sep() { echo -e "  ${BLU}${BOLD}╠${HR2}╣${R}"; }
-    _hdr() { printf "  ${BLU}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" "$1"; }
+    _hdr() { printf "  ${BLU}${BOLD}║${R}  ${CYN}${BOLD}%-72s${R}  ${BLU}${BOLD}║${R}\n" "$1"; }
 
     _hdr "Docker Stack"
     _sep
@@ -872,36 +891,36 @@ print_summary() {
     _row "Docker Compose"   "$(docker compose version 2>/dev/null || echo 'installed')"
     _row "Buildx"           "$(docker buildx version 2>/dev/null | head -1 || echo 'installed')"
     _row "Deploy User"      "${DEPLOY_USER}  (member of docker group)"
-    _row "Daemon Config"    "/etc/docker/daemon.json  (BuildKit + log rotation)"
+    _row "Daemon Config"    "/etc/docker/daemon.json (BuildKit + log rotation)"
     _row "Metrics Endpoint" "http://127.0.0.1:${DOCKER_METRICS_PORT}/metrics"
 
     _sep
     _hdr "Monitoring & Management Integration"
     _sep
-    _row "Cockpit UI"       "Container management & logs → https://localhost:9090"
+    _row "Cockpit UI"       "Containers & logs -> https://localhost:9090"
     if $SETUP_CADVISOR; then
-        _row "cAdvisor"     "Container CPU/RAM/net/disk → :${CADVISOR_PORT}"
+        _row "cAdvisor"     "Container CPU/RAM/net/disk -> :${CADVISOR_PORT}"
     fi
     if $VM_EXISTS; then
-        _row "VictoriaMetrics" "Time-series metrics & VMUI → http://localhost:8428/vmui"
+        _row "VictoriaMetrics" "Time-series metrics & VMUI -> http://localhost:8428/vmui"
     fi
 
     _sep
-    _hdr "🔭  Access Management & Metrics (SSH Tunnels)"
+    _hdr "Access Management & Metrics (SSH Tunnels)"
     _sep
-    printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
+    printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
         "Cockpit GUI:         ssh -L 9090:127.0.0.1:9090 ${DEPLOY_USER}@<server-ip>"
-    printf "  ${BLU}${BOLD}║${R}  ${WHT}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
+    printf "  ${BLU}${BOLD}║${R}  ${WHT}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
         "                     https://localhost:9090  (Login as ${DEPLOY_USER})"
     if $VM_EXISTS; then
-        printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
+        printf "  ${BLU}${BOLD}║${R}  ${GRN}${BOLD}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
             "VictoriaMetrics VMUI: ssh -L 8428:localhost:8428 ${DEPLOY_USER}@<server-ip>"
-        printf "  ${BLU}${BOLD}║${R}  ${WHT}%-74s${R}  ${BLU}${BOLD}║${R}\n" \
+        printf "  ${BLU}${BOLD}║${R}  ${WHT}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
             "                     http://localhost:8428/vmui"
     fi
 
     _sep
-    _hdr "🐳  Docker Quick Reference"
+    _hdr "Docker Quick Reference"
     _sep
     local cmds=(
         "docker ps                        list running containers"
@@ -916,21 +935,19 @@ print_summary() {
         "docker system prune -af          free all unused disk"
     )
     for c in "${cmds[@]}"; do
-        printf "  ${BLU}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${BLU}${BOLD}║${R}
-" "$c"
+        printf "  ${BLU}${BOLD}║${R}  ${CYN}>${R}  ${WHT}%-69s${R}  ${BLU}${BOLD}║${R}\n" "$c"
     done
 
     _sep
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}
-" \
-            "  Log: ${LOG_FILE}"
+    printf  "  ${BLU}${BOLD}║${R}  ${GRY}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "Log: ${LOG_FILE}"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 }
 
 main() {
-    mkdir -p "$(dirname "$LOG_FILE")"
-    touch "$LOG_FILE" && chmod 640 "$LOG_FILE" 2>/dev/null || true
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    touch "$LOG_FILE" 2>/dev/null && chmod 640 "$LOG_FILE" 2>/dev/null || true
 
     parse_args "$@"
     show_banner

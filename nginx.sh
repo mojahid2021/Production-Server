@@ -72,21 +72,21 @@ error()   { echo -e "  ${CROSS}  ${RED}$*${R}" >&2;          _log ERROR "$*"; }
 die()     { echo -e "\n  ${CROSS}  ${RED}${BOLD}FATAL: $*${R}\n" >&2; _log ERROR "$*"; exit 1; }
 
 banner() {
-    clear
+    clear 2>/dev/null || true
     echo ""
     echo -e "${BLU}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${BLU}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  🚀  nginx.sh  —  Nginx Domain Setup Script  v${SCRIPT_VERSION}"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Ubuntu 20.04 / 22.04 / 24.04 LTS  ·  Static · Node.js · Laravel · PHP"
+    printf  "  ${BLU}${BOLD}║${R}  ${WHT}${BOLD}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "nginx.sh  --  Nginx Domain Setup Script  v${SCRIPT_VERSION}"
+    printf  "  ${BLU}${BOLD}║${R}  ${GRY}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "Ubuntu 20.04 / 22.04 / 24.04 LTS  |  Static, Node.js, Laravel, PHP"
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
-    printf  "  ${BLU}${BOLD}║${R}${GRN}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  acme.sh SSL  ·  Let's Encrypt → ZeroSSL → BuyPass Go SSL  (Multi-CA)"
-    printf  "  ${BLU}${BOLD}║${R}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  Auto-renews every 30 days · nginx reloaded silently · config never touched"
+    printf  "  ${BLU}${BOLD}║${R}  ${GRN}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "acme.sh SSL  --  Let's Encrypt -> ZeroSSL -> BuyPass Go SSL (Multi-CA)"
+    printf  "  ${BLU}${BOLD}║${R}  ${GRY}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "Auto-renews every 30 days | nginx reloads silently | config safe"
     echo -e "${BLU}${BOLD}  ╠${HR2}╣${R}"
-    printf  "  ${BLU}${BOLD}║${R}${DIM}${GRY}%-76s${R}${BLU}${BOLD}║${R}\n" \
-            "  github.com/mojahid2021/Production-Server"
+    printf  "  ${BLU}${BOLD}║${R}  ${DIM}${GRY}%-72s${R}  ${BLU}${BOLD}║${R}\n" \
+            "github.com/mojahid2021/Production-Server"
     echo -e "${BLU}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 }

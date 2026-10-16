@@ -13,9 +13,9 @@
 # ║  06. Git — install and configure                                             ║
 # ║  07. NVM + Node.js installation                                              ║
 # ║  08. PM2 — process manager + bulletproof systemd startup                    ║
-# ║  09. Monitoring — Cockpit (Host Management & Logs)                          ║
-# ║      + VictoriaMetrics (PM2 & App Metrics TSDB + VMUI)                       ║
-# ║      + status script + compact journald + swap safeguard                     ║
+# ║  09. Monitoring — Cockpit Web Console (Host Management & Logs)             ║
+# ║      + PM2 Admin Bridge & GUI Extension (Node.js Process Control)            ║
+# ║      + status script + compact journald (Zero-Idle-RAM)                      ║
 # ║  10. Kernel hardening (sysctl)                                               ║
 # ║  11. fail2ban — brute force SSH protection                                   ║
 # ║  12. UFW firewall                                                            ║
@@ -35,7 +35,7 @@
 # ║        --no-nvm     Skip NVM + Node.js                                       ║
 # ║        --no-pm2     Skip PM2                                                 ║
 # ║        --no-fw      Skip UFW                                                 ║
-# ║        --no-mon     Skip Cockpit & VictoriaMetrics monitoring               ║
+# ║        --no-mon     Skip Cockpit Web Console & PM2 GUI monitoring            ║
 # ║    -h  --help       Show this help and exit                                  ║
 # ║                                                                              ║
 # ║  EXAMPLES                                                                    ║
@@ -112,20 +112,20 @@ run() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 show_banner() {
-    clear
+    clear 2>/dev/null || true
     echo ""
     echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${PRP}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}${PRP}${BOLD}║${R}\n" \
-            "⚡  init.sh  —  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
-    printf  "  ${PRP}${BOLD}║${R}  ${GRY}%-74s${R}${PRP}${BOLD}║${R}\n" \
-            "Ubuntu 20.04 / 22.04 / 24.04 LTS  ·  Git · NVM · Node.js · PM2 · Cockpit · VM"
+    printf  "  ${PRP}${BOLD}║${R}  ${CYN}${BOLD}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
+            "init.sh  --  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRY}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
+            "Ubuntu 20.04 / 22.04 / 24.04 LTS  ·  Git · NVM · Node.js · PM2 · Cockpit"
     echo -e "${PRP}${BOLD}  ╠${HR2}╣${R}"
-    printf  "  ${PRP}${BOLD}║${R}  ${GRN}%-14s${R}${GRY}%-62s${R}${PRP}${BOLD}║${R}\n" \
-            "  Interactive" "sudo ./init.sh"
-    printf  "  ${PRP}${BOLD}║${R}  ${GRN}%-14s${R}${GRY}%-62s${R}${PRP}${BOLD}║${R}\n" \
-            "  With flags " "sudo ./init.sh -u <user> -n 20"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRN}%-14s${R}  ${GRY}%-56s${R}  ${PRP}${BOLD}║${R}\n" \
+            "Interactive" "sudo ./init.sh"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRN}%-14s${R}  ${GRY}%-56s${R}  ${PRP}${BOLD}║${R}\n" \
+            "With flags" "sudo ./init.sh -u <user> -n 20"
     echo -e "${PRP}${BOLD}  ╠${HR2}╣${R}"
-    printf  "  ${PRP}${BOLD}║${R}  ${DIM}${GRY}%-74s${R}${PRP}${BOLD}║${R}\n" \
+    printf  "  ${PRP}${BOLD}║${R}  ${DIM}${GRY}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
             "github.com/mojahid2021/Production-Server"
     echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
@@ -138,9 +138,9 @@ show_banner() {
 usage() {
     echo ""
     echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${PRP}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}${PRP}${BOLD}║${R}\n" \
-            "⚡  init.sh  —  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
-    printf  "  ${PRP}${BOLD}║${R}  ${DIM}${GRY}%-74s${R}${PRP}${BOLD}║${R}\n" \
+    printf  "  ${PRP}${BOLD}║${R}  ${CYN}${BOLD}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
+            "init.sh  --  Node.js Production Server Provisioner  v${SCRIPT_VERSION}"
+    printf  "  ${PRP}${BOLD}║${R}  ${DIM}${GRY}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
             "github.com/mojahid2021/Production-Server"
     echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
@@ -258,9 +258,9 @@ prompt_inputs() {
     # ── Header ────────────────────────────────────────────────────────────────
     echo ""
     echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${PRP}${BOLD}║${R}  ${WHT}${BOLD}%-74s${R}${PRP}${BOLD}║${R}\n" \
-            "⚙   Interactive Setup Wizard"
-    printf  "  ${PRP}${BOLD}║${R}  ${GRY}%-74s${R}${PRP}${BOLD}║${R}\n" \
+    printf  "  ${PRP}${BOLD}║${R}  ${WHT}${BOLD}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
+            "Interactive Setup Wizard"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRY}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
             "Answer each prompt below.  Press Enter to accept any default value."
     echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
 
@@ -507,26 +507,26 @@ prompt_inputs() {
     # ══════════════════════════════════════════════════════════════════════════
     echo ""
     echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${PRP}${BOLD}║${R}${WHT}${BOLD}%-76s${R}${PRP}${BOLD}║${R}\n" \
-            "  📋  Configuration Summary — Please Review"
+    printf  "  ${PRP}${BOLD}║${R}  ${WHT}${BOLD}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
+            "Configuration Summary -- Please Review"
     echo -e "${PRP}${BOLD}  ╠${HR2}╣${R}"
     _conf_row() {
         printf "  ${PRP}${BOLD}║${R}  ${GRY}%-18s${R}  ${WHT}${BOLD}%-52s${R}  ${PRP}${BOLD}║${R}\n" "$1" "$2"
     }
-    _conf_row "Username"     "${USERNAME}$( $IS_EXISTING_USER && echo " (existing — update)" || echo "" )"
+    _conf_row "Username"     "${USERNAME}$( $IS_EXISTING_USER && echo " (existing -- update)" || echo "" )"
     if [[ "$CUSTOM_PASS" == "__KEEP__" ]]; then
         _conf_row "Password"     "keep existing"
     else
         _conf_row "Password"     "$([ -n "$CUSTOM_PASS" ] && echo "custom (hidden)" || echo "will be auto-generated")"
     fi
     _conf_row "Node.js"      "v${NODE_VER}  (via NVM ${NVM_VERSION})"
-    _conf_row "NVM"          "$(  $INSTALL_NVM && echo "✔ install" || echo "– skip (--no-nvm)")"
-    _conf_row "PM2"          "$(  $INSTALL_PM2 && echo "✔ install" || echo "– skip (--no-pm2)")"
+    _conf_row "NVM"          "$(  $INSTALL_NVM && echo "install" || echo "skip (--no-nvm)")"
+    _conf_row "PM2"          "$(  $INSTALL_PM2 && echo "install" || echo "skip (--no-pm2)")"
     _conf_row "Swap Cushion" "$SWAP_SIZE"
     _conf_row "Swap Trigger" "Activates at ${SWAP_RAM_THRESHOLD}% RAM (swappiness=${SWAPPINESS})"
-    _conf_row "UFW"          "$(  $GEN_FW      && echo "✔ configure" || echo "– skip (--no-fw)")"
+    _conf_row "UFW"          "$(  $GEN_FW      && echo "configure" || echo "skip (--no-fw)")"
     _conf_row "Firewall"     "SSH + $( [[ "$OPEN_NGINX_PORTS" == true ]] && echo "Nginx " ; [[ "$OPEN_EMAIL_PORTS" == true ]] && echo "Email " ; [[ -n "$CUSTOM_PORTS" ]] && echo "Custom " ; echo "")"
-    _conf_row "Monitoring"   "$( $SETUP_MON   && echo "✔ Cockpit · Node.js PM2 GUI · Journald (0 MB idle)" || echo "– skip (--no-mon)")"
+    _conf_row "Monitoring"   "$( $SETUP_MON   && echo "Cockpit, Node.js PM2 GUI, Journald (0 MB idle)" || echo "skip (--no-mon)")"
     echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 
@@ -640,7 +640,7 @@ check_dependencies() {
     fi
     ok "bash ${BASH_VERSION} — ok"
 
-    # ── 2. curl or wget (NVM and VictoriaMetrics download) ───────────────────
+    # ── 2. curl or wget (NVM download) ───────────────────────────────────────
     if command -v curl &>/dev/null; then
         ok "curl $(curl --version 2>/dev/null | head -1 | awk '{print $2}') — ok"
     elif command -v wget &>/dev/null; then
@@ -662,7 +662,7 @@ check_dependencies() {
             || die "Failed to install openssl. Install it manually and re-run."
     fi
 
-    # ── 4. tar (extract VictoriaMetrics binary archive) ───────────────────────
+    # ── 4. tar (archive extraction utility) ───────────────────────────────────
     if command -v tar &>/dev/null; then
         ok "tar — ok"
     else
@@ -776,7 +776,7 @@ check_dependencies() {
 
     # ── 14. Cockpit & Monitoring Prerequisites ───────────────────────────────
     if $SETUP_MON; then
-        info "Checking monitoring prerequisites (Cockpit + VictoriaMetrics)..."
+        info "Checking monitoring prerequisites (Cockpit Web Console)..."
         DEBIAN_FRONTEND=noninteractive apt-get install -y \
             apt-transport-https ca-certificates curl gnupg tar 2>/dev/null | \
             grep -E '(Setting up|already installed)' || true
@@ -2455,47 +2455,45 @@ EOF
 print_summary() {
     echo ""
     echo -e "${PRP}${BOLD}  ╔${HR2}╗${R}"
-    printf  "  ${PRP}${BOLD}║${R}${GRN}${BOLD}%-76s${R}${PRP}${BOLD}║${R}\n" \
-            "  ✔  Provisioning Complete"
-    printf  "  ${PRP}${BOLD}║${R}${GRY}%-76s${R}${PRP}${BOLD}║${R}\n" \
-            "  Your Node.js production server is ready."
+    printf  "  ${PRP}${BOLD}║${R}  ${GRN}${BOLD}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
+            "✔  Provisioning Complete"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRY}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
+            "Your Node.js production server is ready."
     echo -e "${PRP}${BOLD}  ╠${HR2}╣${R}"
 
-    _row() { printf "  ${PRP}${BOLD}║${R}  ${GRY}%-22s${R}  ${WHT}${BOLD}%-50s${R}  ${PRP}${BOLD}║${R}\n" "$1" "$2"; }
+    _row() { printf "  ${PRP}${BOLD}║${R}  ${GRY}%-18s${R}  ${WHT}${BOLD}%-52s${R}  ${PRP}${BOLD}║${R}\n" "$1" "$2"; }
     _sep() { echo -e "  ${PRP}${BOLD}╠${HR2}╣${R}"; }
-    _hdr() { printf "  ${PRP}${BOLD}║${R}  ${CYN}${BOLD}%-74s${R}  ${PRP}${BOLD}║${R}\n" "$1"; }
+    _hdr() { printf "  ${PRP}${BOLD}║${R}  ${CYN}${BOLD}%-72s${R}  ${PRP}${BOLD}║${R}\n" "$1"; }
 
     _hdr "Server Details"
     _sep
     _row "User"           "$USERNAME"
     _row "Home Directory" "/home/$USERNAME"
     _row "Node.js"        "v${NODE_VER}  (via NVM ${NVM_VERSION})"
-    _row "PM2 Service"    "pm2-${USERNAME}  (systemd — auto-starts on reboot)"
-    _row "Swap Cushion"   "${SWAP_SIZE:-2G} (at ${SWAP_RAM_THRESHOLD:-90}% RAM, swappiness=${SWAPPINESS:-10})"
-    _row "SSH Access"     "password + SSH key  (both supported)"
-    _row "Root Access"    "ssh ${USERNAME}@<server>  →  sudo -i  (direct root SSH blocked)"
-    _row "Monitoring"     "Cockpit Web Console :9090 [Host, Logs & PM2 Apps] (0 MB Idle RAM)"
+    _row "PM2 Service"    "pm2-${USERNAME}  (auto-starts on reboot)"
+    _row "Swap Cushion"   "${SWAP_SIZE:-2G} (trigger: ${SWAP_RAM_THRESHOLD:-90}% RAM, swappiness=${SWAPPINESS:-10})"
+    _row "SSH Access"     "Password + SSH Key  (both supported)"
+    _row "Root Access"    "sudo -i  (direct root SSH disabled)"
+    _row "Monitoring"     "Cockpit GUI :9090  (0 MB idle RAM)"
 
     _sep
     if [[ -n "$PASSWORD" && "$PASSWORD" != "__KEEP__" ]]; then
-        printf "  ${PRP}${BOLD}║${R}  ${YLW}${BOLD}%-22s${R}  ${ORG}${BOLD}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
-            "⚠  Password" "$PASSWORD"
-        printf "  ${PRP}${BOLD}║${R}  ${GRY}%-22s${R}  ${GRY}%-50s${R}  ${PRP}${BOLD}║${R}\n" \
-            "" "Save this now — it will NOT be shown again."
+        _row "Password" "$PASSWORD"
+        _row "" "Save this now -- it will NOT be shown again."
     else
         _row "Password" "(existing password retained)"
     fi
 
     _sep
-    _hdr "🚀  Deploy Your First Node.js App  (repeat per project)"
+    _hdr "Deploy Your First Node.js App (repeat per project)"
     _sep
     local node_steps=(
         "ssh ${USERNAME}@<server-ip>"
         "git clone https://github.com/you/repo.git ~/projects/myapp"
         "cd ~/projects/myapp && npm install"
-        "nano .env                     ← add your environment secrets"
+        "nano .env                     <- add your environment secrets"
         "pm2 start app.js --name myapp -- --port 3000"
-        "pm2 save                      ← REQUIRED: survive reboots"
+        "pm2 save                      <- REQUIRED: survive reboots"
     )
     local i=1
     for s in "${node_steps[@]}"; do
@@ -2504,61 +2502,60 @@ print_summary() {
     done
 
     _sep
-    _hdr "📡  Management & Monitoring Quick Reference"
+    _hdr "Management & Monitoring Quick Reference"
     _sep
     local mon_steps=(
-        "server_status                 quick overview of system & services"
-        "tunnel                        show SSH tunnel command for Cockpit Web GUI"
-        "sys_logs                      view recent system journal logs"
-        "sys_errors                    view critical system error logs"
-        "nginx_logs                    view web server access and errors"
-        "pm2_jlogs                     view PM2 systemd journal logs"
-        "pm2 monit                     live terminal Node.js process monitor"
-        "pm2 logs                      tail live logs of all PM2 apps"
-        "plog_app <app-name>           view last 100 lines for one app"
-        "plog_errors                   view recent errors from all apps"
+        "server_status               quick overview of system & services"
+        "tunnel                      show SSH tunnel command for Cockpit GUI"
+        "sys_logs                    view recent system journal logs"
+        "sys_errors                  view critical system error logs"
+        "nginx_logs                  view web server access and errors"
+        "pm2_jlogs                   view PM2 systemd journal logs"
+        "pm2 monit                   live terminal Node.js process monitor"
+        "pm2 logs                    tail live logs of all PM2 apps"
+        "plog_app <name>             view last 100 lines for one app"
+        "plog_errors                 view recent errors from all apps"
     )
     for s in "${mon_steps[@]}"; do
-        printf "  ${PRP}${BOLD}║${R}  ${CYN}›${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
+        printf "  ${PRP}${BOLD}║${R}  ${CYN}>${R}  ${WHT}%-69s${R}  ${PRP}${BOLD}║${R}\n" "$s"
     done
 
     _sep
-    _hdr "🖥️  COCKPIT WEB CONSOLE (Host, Logs & Node.js PM2 GUI)"
+    _hdr "COCKPIT WEB CONSOLE (Host, Logs & Node.js PM2 GUI)"
     _sep
     local cockpit_info=(
-        "🔗 Access via SSH Tunnel (Socket Active on 127.0.0.1:9090):"
-        "   ssh -L 9090:127.0.0.1:9090 ${USERNAME}@<server-ip>"
-        "   Open in Browser: https://localhost:9090"
-        "   Login with: ${USERNAME} (or root) and your password"
+        "Access via SSH Tunnel (Socket Active on 127.0.0.1:9090):"
+        "  ssh -L 9090:127.0.0.1:9090 ${USERNAME}@<server-ip>"
+        "  Open in Browser: https://localhost:9090"
+        "  Login with: ${USERNAME} (or root) and your password"
         ""
         "Features Included:"
-        " • Node.js (PM2) GUI: live app list, RAM/CPU, start/stop/restart & logs"
-        " • Real-time hardware utilization (CPU, RAM, Disk I/O, Network)"
-        " • systemd service control (start/stop/restart PM2, Nginx, Docker)"
-        " • Journald log search, filtering by priority, unit, and keyword"
-        " • Web terminal with full root/sudo escalation"
-        " • Pure Zero-Idle-RAM: sleeps completely until opened in your browser"
+        "  - Node.js (PM2) GUI: live app list, RAM/CPU, start/stop & logs"
+        "  - Real-time hardware utilization (CPU, RAM, Disk I/O, Network)"
+        "  - systemd service control (start/stop/restart PM2, Nginx, Docker)"
+        "  - Journald log search, filtering by priority, unit, and keyword"
+        "  - Web terminal with full root/sudo escalation"
+        "  - Pure Zero-Idle-RAM: sleeps completely until opened in browser"
     )
     for s in "${cockpit_info[@]}"; do
-        [[ -z "$s" ]] && { printf "  ${PRP}${BOLD}║${R}\n"; continue; }
-        printf "  ${PRP}${BOLD}║${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
+        printf "  ${PRP}${BOLD}║${R}  ${WHT}%-72s${R}  ${PRP}${BOLD}║${R}\n" "$s"
     done
 
     _sep
-    _hdr "📖  Add a Second Project  (fully independent)"
+    _hdr "Add a Second Project (fully independent)"
     _sep
     local multi_steps=(
         "pm2 start app.js --name blog -- --port 4000"
-        "pm2 save                      ← always save after adding an app"
+        "pm2 save                      <- always save after adding an app"
         "Each app has its own port, logs, and restart policy"
     )
     for s in "${multi_steps[@]}"; do
-        printf "  ${PRP}${BOLD}║${R}  ${GRN}·${R}  ${WHT}%-70s${R}  ${PRP}${BOLD}║${R}\n" "$s"
+        printf "  ${PRP}${BOLD}║${R}  ${GRN}*${R}  ${WHT}%-69s${R}  ${PRP}${BOLD}║${R}\n" "$s"
     done
 
     _sep
-    printf  "  ${PRP}${BOLD}║${R}${GRY}%-76s${R}${PRP}${BOLD}║${R}\n" \
-            "  Log file: ${LOG_FILE}"
+    printf  "  ${PRP}${BOLD}║${R}  ${GRY}%-72s${R}  ${PRP}${BOLD}║${R}\n" \
+            "Log file: ${LOG_FILE}"
     echo -e "${PRP}${BOLD}  ╚${HR2}╝${R}"
     echo ""
 }
@@ -2568,8 +2565,8 @@ print_summary() {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 main() {
-    mkdir -p "$(dirname "$LOG_FILE")"
-    touch "$LOG_FILE" && chmod 640 "$LOG_FILE" 2>/dev/null || true
+    mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+    touch "$LOG_FILE" 2>/dev/null && chmod 640 "$LOG_FILE" 2>/dev/null || true
 
     parse_args "$@"
     show_banner
@@ -2585,7 +2582,7 @@ main() {
     install_git         # 06
     install_node        # 07
     install_pm2         # 08 — bulletproof
-    setup_monitoring    # 09 — Cockpit + VictoriaMetrics + PM2 + server_status
+    setup_monitoring    # 09 — Cockpit Web Console + PM2 GUI + server_status
     harden_kernel       # 10
     setup_fail2ban      # 11
     setup_firewall      # 12
