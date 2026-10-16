@@ -500,7 +500,12 @@ collect_site_type() {
       done
       PROXY_PASS="http://${PROXY_HOST}:${PROXY_PORT}"
       info "Proxying to: ${PROXY_PASS}"
-      ask_yes_no "Enable WebSocket support? (Socket.io, ws://, etc.)" "n" && FEAT_WEBSOCKET=true
+      if [[ "$PROXY_PORT" == "9090" ]]; then
+        info "Port 9090 (Cockpit Web Console) detected — automatically enabling WebSocket & live streaming optimization."
+        FEAT_WEBSOCKET=true
+      else
+        ask_yes_no "Enable WebSocket support? (Socket.io, ws://, etc.)" "n" && FEAT_WEBSOCKET=true
+      fi
       # Public/static assets directory — optional custom path
       ROOT_DIR="/var/www/${DOMAIN}/public"
       if ask_yes_no "Set a custom public/static assets directory?" "n"; then
@@ -1043,7 +1048,25 @@ SENS
     echo ""
     case "$SITE_TYPE" in
       proxy)
-        cat <<PROXY
+        if [[ "$PROXY_PORT" == "9090" ]]; then
+          cat <<CPCONF
+    location / {
+        proxy_pass            ${PROXY_PASS};
+        proxy_http_version    1.1;
+        proxy_set_header      Host              \$host;
+        proxy_set_header      X-Real-IP         \$remote_addr;
+        proxy_set_header      X-Forwarded-For   \$proxy_add_x_forwarded_for;
+        proxy_set_header      X-Forwarded-Proto \$scheme;
+        proxy_set_header      Upgrade           \$http_upgrade;
+        proxy_set_header      Connection        "upgrade";
+        proxy_read_timeout    86400s;
+        proxy_connect_timeout 10s;
+        proxy_buffering       off;
+        gzip                  off;
+    }
+CPCONF
+        else
+          cat <<PROXY
     location / {
         proxy_pass            ${PROXY_PASS};
         proxy_http_version    1.1;
@@ -1060,11 +1083,12 @@ SENS
         if (\$request_uri ~* "(etc/passwd|etc/shadow|proc/self|boot\.ini)") { return 403; }
         if (\$request_uri ~* "(base64_decode|eval\(|system\(|passthru\(|shell_exec\()") { return 403; }
 PROXY
-        [[ "$FEAT_WEBSOCKET" == "true" ]] && {
-          echo "        proxy_set_header   Upgrade    \$http_upgrade;"
-          echo "        proxy_set_header   Connection \"upgrade\";"
-        }
-        echo "    }"
+          [[ "$FEAT_WEBSOCKET" == "true" ]] && {
+            echo "        proxy_set_header   Upgrade    \$http_upgrade;"
+            echo "        proxy_set_header   Connection \"upgrade\";"
+          }
+          echo "    }"
+        fi
         ;;
       php)
         case "$PHP_FRAMEWORK" in
@@ -1439,6 +1463,18 @@ test_and_reload() {
   systemctl reload nginx 2>/dev/null || service nginx reload 2>/dev/null || \
     warn "Could not reload — run: sudo systemctl reload nginx"
   success "Nginx reloaded."
+
+  if [[ "$SITE_TYPE" == "proxy" && "$PROXY_PORT" == "9090" ]]; then
+    if command -v cockpit_add_origin &>/dev/null; then
+      cockpit_add_origin "${DOMAIN}" 2>/dev/null || true
+    elif [[ -f /etc/cockpit/cockpit.conf ]]; then
+      if ! grep -q "${DOMAIN}" /etc/cockpit/cockpit.conf 2>/dev/null; then
+        sed -i "/^Origins/ s|$| https://${DOMAIN} wss://${DOMAIN}|" /etc/cockpit/cockpit.conf 2>/dev/null || true
+        systemctl restart cockpit.socket 2>/dev/null || true
+        success "Registered https://${DOMAIN} in Cockpit Origins (/etc/cockpit/cockpit.conf)."
+      fi
+    fi
+  fi
 }
 
 # ─── Final summary ────────────────────────────────────────────────────────────

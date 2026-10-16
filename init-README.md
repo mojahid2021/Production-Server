@@ -25,7 +25,7 @@ git clone → npm install → pm2 start → nginx_add_site
 |---|---|
 | OS | Ubuntu 20.04, 22.04, or 24.04 LTS |
 | Access | Must run as root (`sudo`) |
-| Internet | Required (downloads NVM, Node.js, VictoriaMetrics) |
+| Internet | Required (downloads NVM and Node.js) |
 | Fresh server | Recommended — works on existing servers too |
 
 ---
@@ -641,10 +641,8 @@ All aliases are available immediately after login.
 | `/var/log/nginx/` | Nginx access and error logs (rotated every 30 days) |
 | `/usr/local/bin/nginx_add_site` | Helper to add a new project to Nginx |
 | `/usr/local/bin/server_status` | Quick server overview CLI tool |
+| `/usr/local/bin/cockpit_add_origin` | CLI tool to register reverse proxy domains with Cockpit |
 | `/etc/cockpit/cockpit.conf` | Cockpit web console configuration (port 9090) |
-| `/etc/victoriametrics/scrape.yml` | VictoriaMetrics scrape configuration (PM2, Node, Docker) |
-| `/var/lib/victoria-metrics/` | VictoriaMetrics time-series TSDB data storage |
-| `/usr/local/bin/victoria-metrics` | VictoriaMetrics single binary |
 | `/etc/sudoers.d/90-<user>` | Sudo rules for the deploy user |
 | `/etc/fail2ban/jail.d/node-provision.conf` | fail2ban SSH jail config |
 | `/etc/sysctl.d/99-node-provision.conf` | Kernel hardening sysctl settings |
@@ -716,15 +714,38 @@ sudo ufw allow 8080/tcp
 sudo ufw status
 ```
 
-### Access Cockpit Web Console & VictoriaMetrics
-```bash
-# 1. Access Cockpit (system management, hardware, services, journald logs):
-ssh -L 9090:localhost:9090 mojahid@your-server-ip
-# Then open: http://localhost:9090  (login with your deploy user credentials)
+### Access Cockpit Web Console
 
-# 2. Access VictoriaMetrics VMUI (time-series metrics explorer):
-ssh -L 8428:localhost:8428 mojahid@your-server-ip
-# Then open: http://localhost:8428/vmui
+#### Option A — Via SSH Tunnel (Default & Zero-Idle)
+```bash
+# Connect tunnel from your local computer:
+ssh -L 9090:127.0.0.1:9090 mojahid@your-server-ip
+
+# Then open in browser:
+https://localhost:9090
+```
+
+#### Option B — Via Nginx Reverse Proxy (Domain Access, e.g. sv1.lunecode.com)
+If you point a domain/subdomain to Cockpit via Nginx reverse proxy:
+1. Register your domain in Cockpit's allowed origins:
+```bash
+sudo cockpit_add_origin sv1.lunecode.com
+```
+2. In your Nginx config, forward to `http://127.0.0.1:9090` with WebSocket support:
+```nginx
+location / {
+    proxy_pass            http://127.0.0.1:9090;
+    proxy_http_version    1.1;
+    proxy_set_header      Host              $host;
+    proxy_set_header      X-Real-IP         $remote_addr;
+    proxy_set_header      X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header      X-Forwarded-Proto $scheme;
+    proxy_set_header      Upgrade           $http_upgrade;
+    proxy_set_header      Connection        "upgrade";
+    proxy_read_timeout    86400s;
+    proxy_buffering       off;
+    gzip                  off;
+}
 ```
 
 ### Check fail2ban bans

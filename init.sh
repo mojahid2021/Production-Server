@@ -1301,12 +1301,58 @@ JOURNALDCONF
     done
 
     mkdir -p /etc/cockpit
-    cat > /etc/cockpit/cockpit.conf <<'COCKPITCONF'
+    local _server_fqdn; _server_fqdn=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo "")
+    local _fqdn_origins=""
+    if [[ -n "$_server_fqdn" && "$_server_fqdn" != "localhost" ]]; then
+        _fqdn_origins="https://${_server_fqdn} wss://${_server_fqdn}"
+    fi
+
+    cat > /etc/cockpit/cockpit.conf <<COCKPITCONF
 [WebService]
-Origins = https://localhost:9090 http://localhost:9090 https://127.0.0.1:9090 http://127.0.0.1:9090
+Origins = https://localhost:9090 http://localhost:9090 https://127.0.0.1:9090 http://127.0.0.1:9090 https://sv1.lunecode.com wss://sv1.lunecode.com https://*.lunecode.com wss://*.lunecode.com ${_fqdn_origins} https://* wss://* http://* ws://*
 ProtocolHeader = X-Forwarded-Proto
+ForwardedForHeader = X-Forwarded-For
 AllowUnencrypted = true
 COCKPITCONF
+
+    # Helper script to dynamically add reverse proxy domains to Cockpit
+    cat > /usr/local/bin/cockpit_add_origin <<'ORIGIN_SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ $# -lt 1 ]]; then
+    echo "Usage: sudo cockpit_add_origin <domain>"
+    echo "Example: sudo cockpit_add_origin sv1.lunecode.com"
+    exit 1
+fi
+_DOM="$1"
+mkdir -p /etc/cockpit
+if [[ ! -f /etc/cockpit/cockpit.conf ]]; then
+    cat > /etc/cockpit/cockpit.conf <<EOF
+[WebService]
+Origins = https://localhost:9090 http://localhost:9090 https://127.0.0.1:9090 http://127.0.0.1:9090 https://${_DOM} wss://${_DOM} https://* wss://*
+ProtocolHeader = X-Forwarded-Proto
+ForwardedForHeader = X-Forwarded-For
+AllowUnencrypted = true
+EOF
+else
+    if grep -q "^Origins" /etc/cockpit/cockpit.conf; then
+        if ! grep -q "${_DOM}" /etc/cockpit/cockpit.conf; then
+            sed -i "/^Origins/ s|$| https://${_DOM} wss://${_DOM}|" /etc/cockpit/cockpit.conf
+        fi
+    else
+        sed -i "/\[WebService\]/a Origins = https://localhost:9090 https://${_DOM} wss://${_DOM} https://* wss://*" /etc/cockpit/cockpit.conf
+    fi
+    if ! grep -q "^ProtocolHeader" /etc/cockpit/cockpit.conf; then
+        sed -i "/\[WebService\]/a ProtocolHeader = X-Forwarded-Proto" /etc/cockpit/cockpit.conf
+    fi
+    if ! grep -q "^AllowUnencrypted" /etc/cockpit/cockpit.conf; then
+        sed -i "/\[WebService\]/a AllowUnencrypted = true" /etc/cockpit/cockpit.conf
+    fi
+fi
+systemctl restart cockpit.socket 2>/dev/null || true
+echo "✔ Added ${_DOM} to /etc/cockpit/cockpit.conf and restarted cockpit.socket."
+ORIGIN_SCRIPT
+    chmod 755 /usr/local/bin/cockpit_add_origin 2>/dev/null || true
 
     # Bind Cockpit socket strictly to localhost (127.0.0.1:9090)
     mkdir -p /etc/systemd/system/cockpit.socket.d
