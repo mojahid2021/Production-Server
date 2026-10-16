@@ -803,8 +803,9 @@ cat /var/log/node_provision.log
 ## Security Notes
 
 - **Password login is enabled** — convenient but weaker than key-only. If you add your SSH public key via `-k`, consider disabling password auth later: edit `/etc/ssh/sshd_config`, set `PasswordAuthentication no`, reload sshd.
-- **Root SSH login is permanently blocked** — `PermitRootLogin no` is enforced. To reach root: `ssh` as your deploy user, then `sudo -i`. This is intentional and should not be changed.
+- **Root SSH login is permanently blocked** — `PermitRootLogin no`, `MaxAuthTries 4`, `PermitEmptyPasswords no`, and `X11Forwarding no` are enforced. To reach root: `ssh` as your deploy user, then `sudo -i`.
+- **Firewall default deny on all ports** — UFW enforces `default deny incoming` and `default deny routed` across both IPv4 and IPv6 (`IPV6=yes`). Only explicitly approved ports (SSH, HTTP/S) are reachable.
 - **Monitoring console is localhost-only** — Cockpit Web Console (9090) is bound strictly to `127.0.0.1`. Access is always via encrypted SSH port forwarding tunnel.
 - **fail2ban is active** — 5 failed SSH attempts = 1 hour IP ban. Adjust in `/etc/fail2ban/jail.d/node-provision.conf`.
 - **Nginx blocks secret files** — `.env`, `.git`, `.key`, `.pem`, `.sh` files are blocked at the Nginx level and return 404.
-- **Kernel hardening is applied** — SYN flood, IP spoofing, redirect attacks, and symlink exploits are all mitigated via sysctl.
+- **Kernel hardening is applied** — SYN flood, IP spoofing, IPv4/IPv6 ICMP redirects, IPv6 rogue router advertisements (RA), and symlink exploits are all mitigated via sysctl.

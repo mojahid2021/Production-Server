@@ -512,6 +512,32 @@ EOF
         warn "Docker metrics endpoint not responding yet — may still be starting."
     fi
 
+    # ── UFW Integration (Prevent Docker from bypassing UFW) ──────────────────
+    if command -v ufw &>/dev/null && [[ -f /etc/ufw/after.rules ]]; then
+        if ! grep -q "DOCKER-USER" /etc/ufw/after.rules; then
+            info "Securing UFW firewall against Docker port bypass..."
+            cp /etc/ufw/after.rules "/etc/ufw/after.rules.bak.$(date +%s)"
+            cat >> /etc/ufw/after.rules <<'UFWDOCKER'
+
+# ── Docker UFW Protection (Enforces UFW rules for published container ports) ──
+*filter
+:DOCKER-USER - [0:0]
+-A DOCKER-USER -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN
+-A DOCKER-USER -i lo -j RETURN
+-A DOCKER-USER -i docker0 -j RETURN
+-A DOCKER-USER -i br-+ -j RETURN
+-A DOCKER-USER -m conntrack --ctstate INVALID -j DROP
+-A DOCKER-USER -j ufw-user-forward
+-A DOCKER-USER -j RETURN
+COMMIT
+UFWDOCKER
+            ufw reload &>/dev/null || true
+            ok "UFW-Docker protection enabled (/etc/ufw/after.rules patched)."
+        else
+            ok "UFW-Docker protection already active in /etc/ufw/after.rules."
+        fi
+    fi
+
     section_end
 }
 

@@ -828,8 +828,18 @@ setup_ssh() {
             echo "PermitRootLogin no" >> "$sshd_conf"
         fi
 
+        # Additional SSH hardening: drop brute-force attempts and block empty passwords
+        for param in "MaxAuthTries 4" "PermitEmptyPasswords no" "X11Forwarding no"; do
+            local key="${param%% *}"
+            if grep -qiE "^\s*${key}" "$sshd_conf" 2>/dev/null; then
+                sed -i "s/^\s*${key}.*/${param}/" "$sshd_conf"
+            else
+                echo "${param}" >> "$sshd_conf"
+            fi
+        done
+
         systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
-        ok "sshd: PasswordAuthentication=yes, PermitRootLogin=no."
+        ok "sshd: PasswordAuthentication=yes, PermitRootLogin=no, MaxAuthTries=4, X11Forwarding=no."
     fi
 
     ok "SSH: password + key login ENABLED."
@@ -2129,12 +2139,18 @@ net.ipv4.conf.default.rp_filter          = 1
 net.ipv4.tcp_syncookies                  = 1
 net.ipv4.tcp_max_syn_backlog             = 2048
 
-# Disable ICMP redirects
+# Disable ICMP redirects (IPv4 & IPv6)
 net.ipv4.conf.all.accept_redirects       = 0
 net.ipv4.conf.default.accept_redirects   = 0
 net.ipv4.conf.all.send_redirects         = 0
+net.ipv6.conf.all.accept_redirects       = 0
+net.ipv6.conf.default.accept_redirects   = 0
 
-# Log suspicious packets
+# Disable IPv6 Router Advertisements (prevents rogue router MITM)
+net.ipv6.conf.all.accept_ra              = 0
+net.ipv6.conf.default.accept_ra          = 0
+
+# Log suspicious packets & ignore broadcasts
 net.ipv4.conf.all.log_martians           = 1
 net.ipv4.icmp_echo_ignore_broadcasts     = 1
 
@@ -2279,10 +2295,17 @@ setup_firewall() {
         ssh_port=22
     fi
 
+    # Enforce IPv6 filtering in UFW so IPv6 cannot bypass firewall
+    if [[ -f /etc/default/ufw ]]; then
+        sed -i 's/^IPV6=.*/IPV6=yes/' /etc/default/ufw 2>/dev/null || true
+    fi
+
     run "ufw default deny incoming"
     run "ufw default allow outgoing"
+    run "ufw default deny routed"
+    run "ufw logging low"
     run "ufw allow $ssh_port/tcp   comment 'SSH'"
-    # Monitoring ports (9090/9100/13001) are bound to 127.0.0.1 — no UFW rule needed
+    # Cockpit Web Console (9090) is strictly bound to 127.0.0.1 — no external UFW rule opened
 
     if [[ "$OPEN_NGINX_PORTS" == true ]]; then
         run "ufw allow 80/tcp comment 'HTTP'"

@@ -484,6 +484,9 @@ Open Cockpit (`http://localhost:9090` via SSH tunnel) → click **Containers** i
 **Q: Will running containers be interrupted when daemon.json is updated?**
 No. `daemon.json` includes `"live-restore": true`, which means existing running containers continue running when the Docker daemon is restarted.
 
+**Q: Does Docker bypass UFW firewall rules?**
+No. `docker.sh` automatically patches `/etc/ufw/after.rules` using the official `DOCKER-USER` chain filter. This ensures that published container ports (e.g. `-p 8080:8080` or `docker compose`) honor UFW rules and cannot be reached from the public internet unless you explicitly allow them with `sudo ufw allow <port>/tcp`.
+
 ---
 
 ## 📄 License
