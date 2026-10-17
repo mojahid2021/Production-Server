@@ -1309,7 +1309,7 @@ JOURNALDCONF
 
     cat > /etc/cockpit/cockpit.conf <<COCKPITCONF
 [WebService]
-Origins = https://localhost:9090 http://localhost:9090 https://127.0.0.1:9090 http://127.0.0.1:9090 https://sv1.lunecode.com wss://sv1.lunecode.com https://*.lunecode.com wss://*.lunecode.com ${_fqdn_origins} https://* wss://* http://* ws://*
+Origins = https://localhost:9090 http://localhost:9090 https://127.0.0.1:9090 http://127.0.0.1:9090 ${_fqdn_origins} https://* wss://*
 ProtocolHeader = X-Forwarded-Proto
 ForwardedForHeader = X-Forwarded-For
 AllowUnencrypted = true
@@ -1321,7 +1321,7 @@ COCKPITCONF
 set -euo pipefail
 if [[ $# -lt 1 ]]; then
     echo "Usage: sudo cockpit_add_origin <domain>"
-    echo "Example: sudo cockpit_add_origin sv1.lunecode.com"
+    echo "Example: sudo cockpit_add_origin cockpit.example.com"
     exit 1
 fi
 _DOM="$1"

@@ -725,11 +725,11 @@ ssh -L 9090:127.0.0.1:9090 mojahid@your-server-ip
 https://localhost:9090
 ```
 
-#### Option B — Via Nginx Reverse Proxy (Domain Access, e.g. sv1.lunecode.com)
+#### Option B — Via Nginx Reverse Proxy (Domain Access, e.g. cockpit.yourdomain.com)
 If you point a domain/subdomain to Cockpit via Nginx reverse proxy:
 1. Register your domain in Cockpit's allowed origins:
 ```bash
-sudo cockpit_add_origin sv1.lunecode.com
+sudo cockpit_add_origin cockpit.yourdomain.com
 ```
 2. In your Nginx config, forward to `http://127.0.0.1:9090` with WebSocket support:
 ```nginx
